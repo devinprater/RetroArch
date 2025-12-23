@@ -672,6 +672,10 @@ public class RetroActivityCommon extends NativeActivity
   }
 
   public void accessibilitySpeak(String message) {
+    AccessibilityManager accessibilityManager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
+    if (accessibilityManager != null && accessibilityManager.isEnabled()) {
+      accessibilityManager.interrupt();
+    }
     getWindow().getDecorView().announceForAccessibility(message);
   }
 }

@@ -64,6 +64,15 @@ public final class RetroActivityFuture extends RetroActivityCamera {
 
     // If QUITFOCUS parameter is provided then enable that Retroarch quits when focus is lost
     quitfocus = getIntent().hasExtra("QUITFOCUS");
+
+    // Add a fullscreen user interface element for Accessibility to latch onto
+    View accessibilityView = new View(this);
+    accessibilityView.setTag("accessibility_root");
+    accessibilityView.setFocusable(true);
+    accessibilityView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+    addContentView(accessibilityView, new android.view.ViewGroup.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT));
   }
 
   @Override
