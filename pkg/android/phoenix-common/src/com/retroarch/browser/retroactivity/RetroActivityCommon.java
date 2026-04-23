@@ -19,6 +19,7 @@ import com.retroarch.browser.preferences.util.UserPreferences;
 import com.retroarch.playcore.PlayCoreManager;
 
 import android.annotation.TargetApi;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.NativeActivity;
 import android.app.PendingIntent;
 import android.content.res.Configuration;
@@ -38,6 +39,7 @@ import android.os.Bundle;
 import android.os.storage.StorageManager;
 import android.os.storage.StorageVolume;
 import android.system.Os;
+import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityManager;
 import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
@@ -106,6 +108,10 @@ public class RetroActivityCommon extends NativeActivity
   /* Guards against permission request storms — one in-flight request per device. */
   private final Map<Integer, Boolean> mUsbPermissionPending =
           new HashMap<Integer, Boolean>();
+
+  /* TalkBack may suppress repeated announcement text, so vary the trailing
+   * whitespace to force delivery of identical consecutive labels. */
+  private String mAccessibilityDuplicateSpeechHack = "";
 
   /* Clears the in-flight permission flag when the user responds to the system dialog. */
   private BroadcastReceiver mUsbPermissionReceiver = new BroadcastReceiver() {
@@ -1117,16 +1123,58 @@ public class RetroActivityCommon extends NativeActivity
 
   public boolean isScreenReaderEnabled() {
     AccessibilityManager accessibilityManager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
-    boolean isAccessibilityEnabled = accessibilityManager.isEnabled();
-    boolean isExploreByTouchEnabled = accessibilityManager.isTouchExplorationEnabled();
-    return isAccessibilityEnabled && isExploreByTouchEnabled;
+    List<AccessibilityServiceInfo> serviceInfoList;
+
+    if (accessibilityManager == null || !accessibilityManager.isEnabled())
+      return false;
+
+    serviceInfoList = accessibilityManager.getEnabledAccessibilityServiceList(
+          AccessibilityServiceInfo.FEEDBACK_SPOKEN);
+
+    if (serviceInfoList.isEmpty())
+      return false;
+
+    /* Touch exploration avoids false positives from non-screen-reader
+     * accessibility services. Keep NVGT's TalkMan fallback for services
+     * that speak without enabling explore-by-touch. */
+    if (accessibilityManager.isTouchExplorationEnabled())
+      return true;
+
+    for (AccessibilityServiceInfo info : serviceInfoList)
+      if (info.getId().contains("com.nirenr.talkman"))
+        return true;
+
+    return false;
   }
 
-  public void accessibilitySpeak(String message) {
+  private void accessibilitySpeakInternal(String message) {
     AccessibilityManager accessibilityManager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
-    if (accessibilityManager != null && accessibilityManager.isEnabled()) {
-      accessibilityManager.interrupt();
-    }
-    getWindow().getDecorView().announceForAccessibility(message);
+    AccessibilityEvent event;
+
+    if (accessibilityManager == null || !accessibilityManager.isEnabled())
+      return;
+
+    accessibilityManager.interrupt();
+
+    event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_ANNOUNCEMENT);
+    event.setPackageName(getPackageName());
+    event.setClassName(getClass().getName());
+    event.getText().add(message + mAccessibilityDuplicateSpeechHack);
+
+    mAccessibilityDuplicateSpeechHack += " ";
+
+    if (mAccessibilityDuplicateSpeechHack.length() > 20)
+      mAccessibilityDuplicateSpeechHack = "";
+
+    accessibilityManager.sendAccessibilityEvent(event);
+  }
+
+  public void accessibilitySpeak(final String message) {
+    runOnUiThread(new Runnable() {
+      @Override
+      public void run() {
+        accessibilitySpeakInternal(message);
+      }
+    });
   }
 }
