@@ -82,6 +82,24 @@ static const unsigned long retroarch_icon_data[] = {
 0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000
 };
 
+/* Detects a fullscreen sizing bug on some hardware and/or compositors */
+static bool gfx_ctx_wl_should_use_legacy_fullscreen_configure(
+      gfx_ctx_wayland_data_t *wl, int width, int height)
+{
+   if (!wl)
+      return false;
+
+   if (width <= 0 || height <= 0)
+      return false;
+
+   /* If the fullscreen menu appears the same size as the SPLASH_WINDOW
+    * (240x256), then fall back to the legacy fullscreen configure path */
+   if (width <= SPLASH_WINDOW_WIDTH && height <= SPLASH_WINDOW_HEIGHT)
+      return true;
+
+   return false;
+}
+
 void xdg_toplevel_handle_configure_common(gfx_ctx_wayland_data_t *wl,
       void *toplevel,
       int32_t width, int32_t height, struct wl_array *states)
@@ -122,6 +140,16 @@ void xdg_toplevel_handle_configure_common(gfx_ctx_wayland_data_t *wl,
    {
       width  = wl->floating_width;
       height = wl->floating_height;
+   }
+
+   if (wl->fullscreen
+         && gfx_ctx_wl_should_use_legacy_fullscreen_configure(
+            wl, width, height))
+   {
+      /* Fullscreen matches SPLASH_WINDOW size: fall back to legacy path */
+      wl->ignore_configuration = true;
+      width                    = 0;
+      height                   = 0;
    }
 
    if (     (width  > 0)
@@ -194,6 +222,16 @@ void libdecor_frame_handle_configure_common(struct libdecor_frame *frame,
    {
       width  = wl->floating_width;
       height = wl->floating_height;
+   }
+
+   if (wl->fullscreen
+         && gfx_ctx_wl_should_use_legacy_fullscreen_configure(
+            wl, width, height))
+   {
+      /* Fullscreen matches SPLASH_WINDOW size: fall back to legacy path */
+      wl->ignore_configuration = true;
+      width                    = 0;
+      height                   = 0;
    }
 
    if (     width  > 0
@@ -431,42 +469,6 @@ void gfx_ctx_wl_update_title_common(void *data)
    }
 }
 
-bool gfx_ctx_wl_get_metrics_common(void *data,
-      enum display_metric_types type, float *value)
-{
-   display_output_t *od;
-   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)data;
-   output_info_t *oi          = wl ? wl->current_output : NULL;
-
-   if (!oi)
-      wl_list_for_each(od, &wl->all_outputs, link)
-      {
-         oi = od->output;
-         break;
-      };
-
-   switch (type)
-   {
-      case DISPLAY_METRIC_MM_WIDTH:
-         *value = (float)oi->physical_width;
-         break;
-
-      case DISPLAY_METRIC_MM_HEIGHT:
-         *value = (float)oi->physical_height;
-         break;
-
-      case DISPLAY_METRIC_DPI:
-         *value =   (float)oi->width * 25.4f
-                  / (float)oi->physical_width;
-         break;
-
-      default:
-         *value = 0.0f;
-         return false;
-   }
-
-   return true;
-}
 
 static int create_shm_file(off_t size)
 {
@@ -724,7 +726,7 @@ bool gfx_ctx_wl_init_common(
 
 #ifdef HAVE_LIBDECOR_H
 #ifdef HAVE_DYLIB
-   if ((wl->libdecor = dylib_load("libdecor-0.so")))
+   if ((wl->libdecor = dylib_load("libdecor-0.so.0")))
    {
 #define RA_WAYLAND_SYM(rc,fn,params) wl->fn = (rc (*) params)dylib_proc(wl->libdecor, #fn);
 #include "wayland/libdecor_sym.h"
@@ -934,7 +936,7 @@ bool gfx_ctx_wl_init_common(
    }
 #endif
 
-   // Ignore configure events until splash screen has been replaced
+   /* Ignore configure events until splash screen has been replaced */
    wl->ignore_configuration = true;
 
    wl->input.fd = wl_display_get_fd(wl->input.dpy);
@@ -1097,13 +1099,6 @@ bool gfx_ctx_wl_suppress_screensaver(void *data, bool state)
    return true;
 }
 
-float gfx_ctx_wl_get_refresh_rate(void *data)
-{
-   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)data;
-   if (!wl || !wl->current_output)
-      return false;
-   return (float)wl->current_output->refresh_rate / 1000.0f;
-}
 
 bool gfx_ctx_wl_has_focus(void *data)
 {

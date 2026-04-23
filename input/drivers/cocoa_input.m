@@ -839,6 +839,36 @@ static bool cocoa_input_set_sensor_state(void *data, unsigned port,
 #endif
 }
 
+#if TARGET_OS_IOS && defined(HAVE_COREMOTION)
+/* Rotate a 2D sensor vector from the device's hardware coordinate frame
+ * to the current screen coordinate frame.  Accelerometer and gyroscope
+ * X/Y axes are fixed to the hardware (portrait) orientation, so they need
+ * remapping when the interface is in landscape or upside-down. */
+static void cocoa_sensor_rotate_xy(float *x, float *y)
+{
+   float rawX = *x, rawY = *y;
+   UIInterfaceOrientation orient =
+         [[UIApplication sharedApplication] statusBarOrientation];
+   switch (orient)
+   {
+      case UIInterfaceOrientationLandscapeLeft:
+         *x =  rawY;
+         *y = -rawX;
+         break;
+      case UIInterfaceOrientationLandscapeRight:
+         *x = -rawY;
+         *y =  rawX;
+         break;
+      case UIInterfaceOrientationPortraitUpsideDown:
+         *x = -rawX;
+         *y = -rawY;
+         break;
+      default:
+         break;
+   }
+}
+#endif
+
 static float cocoa_input_get_sensor_input(void *data, unsigned port, unsigned id)
 {
 #ifdef HAVE_MFI
@@ -875,15 +905,30 @@ static float cocoa_input_get_sensor_input(void *data, unsigned port, unsigned id
       switch (id)
       {
          case RETRO_SENSOR_ACCELEROMETER_X:
-            return motionManager.deviceMotion.gravity.x + motionManager.deviceMotion.userAcceleration.x;
          case RETRO_SENSOR_ACCELEROMETER_Y:
-            return motionManager.deviceMotion.gravity.y + motionManager.deviceMotion.userAcceleration.y;
+         {
+            float x = motionManager.deviceMotion.gravity.x
+                  + motionManager.deviceMotion.userAcceleration.x;
+            float y = motionManager.deviceMotion.gravity.y
+                  + motionManager.deviceMotion.userAcceleration.y;
+#if TARGET_OS_IOS
+            cocoa_sensor_rotate_xy(&x, &y);
+#endif
+            return (id == RETRO_SENSOR_ACCELEROMETER_X) ? x : y;
+         }
          case RETRO_SENSOR_ACCELEROMETER_Z:
-            return motionManager.deviceMotion.gravity.z + motionManager.deviceMotion.userAcceleration.z;
+            return motionManager.deviceMotion.gravity.z
+                  + motionManager.deviceMotion.userAcceleration.z;
          case RETRO_SENSOR_GYROSCOPE_X:
-            return motionManager.deviceMotion.rotationRate.x;
          case RETRO_SENSOR_GYROSCOPE_Y:
-            return motionManager.deviceMotion.rotationRate.y;
+         {
+            float x = motionManager.deviceMotion.rotationRate.x;
+            float y = motionManager.deviceMotion.rotationRate.y;
+#if TARGET_OS_IOS
+            cocoa_sensor_rotate_xy(&x, &y);
+#endif
+            return (id == RETRO_SENSOR_GYROSCOPE_X) ? x : y;
+         }
          case RETRO_SENSOR_GYROSCOPE_Z:
             return motionManager.deviceMotion.rotationRate.z;
       }
@@ -1014,9 +1059,16 @@ static void cocoa_input_grab_mouse(void *data, bool state)
    if (state)
    {
       NSWindow *window      = (BRIDGE NSWindow*)ui_companion_cocoa.get_main_window(nil);
-      CGPoint window_pos    = window.frame.origin;
-      CGSize window_size    = window.frame.size;
-      CGPoint window_center = CGPointMake(window_pos.x + window_size.width / 2.0f, window_pos.y + window_size.height / 2.0f);
+      /* NSWindow's frame method is declared as a plain getter (not
+       * @property) on the 10.5-10.9 SDKs, so dot-syntax fails on
+       * GCC 4.0.  And on 32-bit Darwin, NSPoint and CGPoint are
+       * separate incompatible types — only unified on LP64.  Use
+       * bracket syntax and build a CGPoint from the float fields
+       * directly. */
+      NSRect window_frame   = [window frame];
+      CGPoint window_center = CGPointMake(
+            window_frame.origin.x + window_frame.size.width  / 2.0f,
+            window_frame.origin.y + window_frame.size.height / 2.0f);
       CGWarpMouseCursorPosition(window_center);
    }
 

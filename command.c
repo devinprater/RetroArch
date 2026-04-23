@@ -436,30 +436,29 @@ bool command_get_config_param(command_t *cmd, const char* arg)
    const char *directory_cache    = settings->paths.directory_cache;
    const char *directory_system   = settings->paths.directory_system;
    const char *path_username      = settings->paths.username;
-
-   if (string_is_equal(arg, "video_fullscreen"))
+   if (memcmp(arg, "video_fullscreen", sizeof("video_fullscreen")) == 0)
    {
       if (video_fullscreen)
          value = "true";
       else
          value = "false";
    }
-   else if (string_is_equal(arg, "savefile_directory"))
+   else if (memcmp(arg, "savefile_directory", sizeof("savefile_directory")) == 0)
       value = dir_get_ptr(RARCH_DIR_SAVEFILE);
-   else if (string_is_equal(arg, "savestate_directory"))
+   else if (memcmp(arg, "savestate_directory", sizeof("savestate_directory")) == 0)
       value = dir_get_ptr(RARCH_DIR_SAVESTATE);
-   else if (string_is_equal(arg, "runtime_log_directory"))
+   else if (memcmp(arg, "runtime_log_directory", sizeof("runtime_log_directory")) == 0)
       value = dir_runtime_log;
-   else if (string_is_equal(arg, "log_dir"))
+   else if (memcmp(arg, "log_dir", sizeof("log_dir")) == 0)
       value = log_dir;
-   else if (string_is_equal(arg, "cache_directory"))
+   else if (memcmp(arg, "cache_directory", sizeof("cache_directory")) == 0)
       value = directory_cache;
-   else if (string_is_equal(arg, "system_directory"))
+   else if (memcmp(arg, "system_directory", sizeof("system_directory")) == 0)
       value = directory_system;
-   else if (string_is_equal(arg, "netplay_nickname"))
+   else if (memcmp(arg, "netplay_nickname", sizeof("netplay_nickname")) == 0)
       value = path_username;
 #ifdef HAVE_BSV_MOVIE
-   else if (string_is_equal(arg, "active_replay"))
+   else if (memcmp(arg, "active_replay", sizeof("active_replay")) == 0)
    {
       input_driver_state_t *input_st = input_state_get_ptr();
       value            = value_dynamic;
@@ -477,7 +476,6 @@ bool command_get_config_param(command_t *cmd, const char* arg)
    }
    #endif
    /* TODO: query any string */
-
    _len  = strlcpy(reply, "GET_CONFIG_PARAM ", sizeof(reply));
    _len += strlcpy(reply + _len, arg, sizeof(reply)  - _len);
    reply[  _len] = ' ';
@@ -589,12 +587,10 @@ command_t* command_uds_new(void)
    int           fd = socket(AF_UNIX, SOCK_STREAM, 0);
    if (fd < 0)
       return NULL;
-
    /* use an abstract socket for simplicity */
    memset(&addr, 0, sizeof(addr));
    addr.sun_family = AF_UNIX;
-   strcpy(&addr.sun_path[1], "retroarch/cmd");
-
+   strlcpy(&addr.sun_path[1], "retroarch/cmd", sizeof(addr.sun_path) - 1);
    if (   bind(fd, (struct sockaddr*)&addr, addrsz) < 0
        || listen(fd, MAX_USER_CONNECTIONS) < 0
        || !socket_nonblock(fd))
@@ -602,19 +598,27 @@ command_t* command_uds_new(void)
       socket_close(fd);
       return NULL;
    }
-
-   cmd             = (command_t*)calloc(1, sizeof(command_t));
-   subcmd          = (command_uds_t*)calloc(1, sizeof(command_uds_t));
-   subcmd->sfd     = fd;
-   subcmd->last_fd = -1;
+   cmd = (command_t*)calloc(1, sizeof(command_t));
+   if (!cmd)
+   {
+      socket_close(fd);
+      return NULL;
+   }
+   subcmd = (command_uds_t*)calloc(1, sizeof(command_uds_t));
+   if (!subcmd)
+   {
+      free(cmd);
+      socket_close(fd);
+      return NULL;
+   }
+   subcmd->sfd          = fd;
+   subcmd->last_fd      = -1;
    for (i = 0; i < MAX_USER_CONNECTIONS; i++)
       subcmd->userfd[i] = -1;
-
-   cmd->userptr = subcmd;
-   cmd->poll    = command_uds_poll;
-   cmd->replier = uds_command_reply;
-   cmd->destroy = uds_command_free;
-
+   cmd->userptr         = subcmd;
+   cmd->poll            = command_uds_poll;
+   cmd->replier         = uds_command_reply;
+   cmd->destroy         = uds_command_free;
    return cmd;
 }
 #endif
@@ -684,49 +688,67 @@ static bool udp_send_packet(const char *host, uint16_t port, const char *msg)
 
 bool command_network_send(const char *cmd_)
 {
-   char *command        = NULL;
-   char *save           = NULL;
+   char buf[4096];
+   char *ptr;
    const char *cmd      = NULL;
+   const char *host     = NULL;
+   const char *port_str = NULL;
+   uint16_t port        = DEFAULT_NETWORK_CMD_PORT;
+   size_t len;
+
+   if (!cmd_ || !*cmd_)
+      return false;
+
+   len = strlen(cmd_);
+   if (len >= sizeof(buf))
+      return false;
 
    if (!network_init())
       return false;
 
-   if (!(command = strdup(cmd_)))
-      return false;
+   memcpy(buf, cmd_, len + 1);
 
-   cmd                  = strtok_r(command, ";", &save);
-   if (cmd)
+   cmd = buf;
+   ptr = strchr(buf, ';');
+   if (ptr)
    {
-      uint16_t port     = DEFAULT_NETWORK_CMD_PORT;
-      const char *port_ = NULL;
-      const char *host  = strtok_r(NULL, ";", &save);
-      if (host)
-         port_          = strtok_r(NULL, ";", &save);
-      else
+      *ptr++ = '\0';
+      host   = ptr;
+      ptr    = strchr(ptr, ';');
+      if (ptr)
       {
-#ifdef _WIN32
-         host = "127.0.0.1";
-#else
-         host = "localhost";
-#endif
-      }
-
-      if (port_)
-         port = strtoul(port_, NULL, 0);
-
-      RARCH_LOG("[NetCMD] %s: \"%s\" to %s:%hu.\n",
-            msg_hash_to_str(MSG_SENDING_COMMAND),
-            cmd, host, (unsigned short)port);
-
-      if (command_verify(cmd) && udp_send_packet(host, port, cmd))
-      {
-         free(command);
-         return true;
+         *ptr++   = '\0';
+         port_str = ptr;
       }
    }
 
-   free(command);
-   return false;
+   if (!cmd || !*cmd)
+      return false;
+
+   if (!host || !*host)
+   {
+#ifdef _WIN32
+      host = "127.0.0.1";
+#else
+      host = "localhost";
+#endif
+   }
+
+   if (port_str && *port_str)
+   {
+      unsigned long val = strtoul(port_str, NULL, 0);
+      if (val > 0 && val <= 0xFFFF)
+         port = (uint16_t)val;
+   }
+
+   RARCH_LOG("[NetCMD] %s: \"%s\" to %s:%hu.\n",
+         msg_hash_to_str(MSG_SENDING_COMMAND),
+         cmd, host, (unsigned short)port);
+
+   if (!command_verify(cmd))
+      return false;
+
+   return udp_send_packet(host, port, cmd);
 }
 #endif
 
@@ -881,7 +903,12 @@ bool command_read_ram(command_t *cmd, const char *arg)
    unsigned int nbytes        = 0;
    unsigned int addr          = -1;
 
-   if (sscanf(arg, "%x %u", &addr, &nbytes) == 2)
+   char *end          = NULL;
+   addr               = (unsigned int)strtoul(arg, &end, 16);
+   if (end && *end == ' ')
+      nbytes          = (unsigned int)strtoul(end + 1, NULL, 10);
+
+   if (end && *end == ' ' && nbytes > 0)
    {
       size_t _len             = 0;
       char *reply_at          = NULL;
@@ -1035,39 +1062,71 @@ bool command_get_status(command_t *cmd, const char* arg)
 {
    size_t _len;
    char reply[4096];
-   uint8_t flags                  = content_get_flags();
+   uint8_t flags;
+
+   if (!cmd)
+      return false;
+
+   if (!cmd->replier)
+      return false;
+
+   flags = content_get_flags();
 
    if (flags & CONTENT_ST_FLAG_IS_INITED)
    {
       /* add some content info */
       core_info_t *core_info      = NULL;
       runloop_state_t *runloop_st = runloop_state_get_ptr();
+      const char *basename_path   = NULL;
+
+      if (!runloop_st)
+      {
+         _len = strlcpy(reply, "GET_STATUS ERROR", sizeof(reply));
+         cmd->replier(cmd, reply, _len);
+         return false;
+      }
 
       core_info_get_current_core(&core_info);
 
-      _len     = strlcpy(reply, "GET_STATUS ", sizeof(reply));
+      _len = strlcpy(reply, "GET_STATUS ", sizeof(reply));
+
       if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
          _len += strlcpy(reply + _len, "PAUSED", sizeof(reply) - _len);
       else
          _len += strlcpy(reply + _len, "PLAYING", sizeof(reply) - _len);
-      _len    += strlcpy(reply + _len, " ", sizeof(reply) - _len);
-      if (core_info)
+
+      _len += strlcpy(reply + _len, " ", sizeof(reply) - _len);
+
+      if (core_info && core_info->system_id)
          _len += strlcpy(reply + _len, core_info->system_id,
                sizeof(reply) - _len);
-      else
+      else if (runloop_st->system.info.library_name)
          _len += strlcpy(reply + _len, runloop_st->system.info.library_name,
                sizeof(reply) - _len);
-      _len    += strlcpy(reply + _len, ",", sizeof(reply) - _len);
-      _len    += strlcpy(reply + _len,
-            path_basename(path_get(RARCH_PATH_BASENAME)), sizeof(reply) - _len);
-      _len    += snprintf(reply + _len, sizeof(reply) - _len,
+      else
+         _len += strlcpy(reply + _len, "UNKNOWN", sizeof(reply) - _len);
+
+      _len += strlcpy(reply + _len, ",", sizeof(reply) - _len);
+
+      basename_path = path_get(RARCH_PATH_BASENAME);
+      if (basename_path)
+      {
+         const char *basename = path_basename(basename_path);
+         if (basename)
+            _len += strlcpy(reply + _len, basename, sizeof(reply) - _len);
+         else
+            _len += strlcpy(reply + _len, "UNKNOWN", sizeof(reply) - _len);
+      }
+      else
+         _len += strlcpy(reply + _len, "UNKNOWN", sizeof(reply) - _len);
+
+      _len += snprintf(reply + _len, sizeof(reply) - _len,
             ",crc32=%lx\n", (unsigned long)content_get_crc());
    }
    else
-       _len = strlcpy(reply, "GET_STATUS CONTENTLESS", sizeof(reply));
+      _len = strlcpy(reply, "GET_STATUS CONTENTLESS", sizeof(reply));
 
    cmd->replier(cmd, reply, _len);
-
    return true;
 }
 
@@ -1085,8 +1144,15 @@ bool command_read_memory(command_t *cmd, const char *arg)
    runloop_state_t *runloop_st        = runloop_state_get_ptr();
    const rarch_system_info_t* sys_info= &runloop_st->system;
 
-   if (sscanf(arg, "%x %u", &address, &nbytes) != 2)
-      return false;
+   {
+      char *end       = NULL;
+      address         = (unsigned int)strtoul(arg, &end, 16);
+      if (!(end && *end == ' '))
+         return false;
+      nbytes          = (unsigned int)strtoul(end + 1, NULL, 10);
+      if (nbytes == 0)
+         return false;
+   }
 
    /* Ensure large enough to return all requested bytes or an error message */
    alloc_size = 64 + nbytes * 3;
@@ -1279,7 +1345,7 @@ static size_t command_event_save_config(const char *config_path,
    char *s, size_t len)
 {
    size_t _len      = 0;
-   bool path_exists = !string_is_empty(config_path);
+   bool path_exists = *config_path;
    const char *str  = path_exists ? config_path :
       path_get(RARCH_PATH_CONFIG);
 
@@ -1304,7 +1370,7 @@ static size_t command_event_save_config(const char *config_path,
       return _len;
    }
 
-   if (!string_is_empty(str))
+   if (str && *str)
    {
       _len = snprintf(s, len, "%s \"%s\".",
             msg_hash_to_str(MSG_FAILED_SAVING_CONFIG_TO),
@@ -1319,8 +1385,12 @@ static size_t command_event_save_config(const char *config_path,
 static size_t command_event_undo_save_state(char *s, size_t len)
 {
    if (content_undo_save_buf_is_empty())
-      return strlcpy(s,
-         msg_hash_to_str(MSG_NO_SAVE_STATE_HAS_BEEN_OVERWRITTEN_YET), len);
+   {
+      enum msg_hash_enums msg = content_undo_save_disabled()
+         ? MSG_CORE_DOES_NOT_SUPPORT_SAVESTATE_UNDO
+         : MSG_NO_SAVE_STATE_HAS_BEEN_OVERWRITTEN_YET;
+      return strlcpy(s, msg_hash_to_str(msg), len);
+   }
    if (!content_undo_save_state())
       return strlcpy(s,
          msg_hash_to_str(MSG_FAILED_TO_UNDO_SAVE_STATE), len);
@@ -1331,9 +1401,12 @@ static size_t command_event_undo_save_state(char *s, size_t len)
 static size_t command_event_undo_load_state(char *s, size_t len)
 {
    if (content_undo_load_buf_is_empty())
-      return strlcpy(s,
-         msg_hash_to_str(MSG_NO_STATE_HAS_BEEN_LOADED_YET),
-         len);
+   {
+      enum msg_hash_enums msg = content_undo_save_disabled()
+         ? MSG_CORE_DOES_NOT_SUPPORT_SAVESTATE_UNDO
+         : MSG_NO_STATE_HAS_BEEN_LOADED_YET;
+      return strlcpy(s, msg_hash_to_str(msg), len);
+   }
    if (!content_undo_load_state())
       return snprintf(s, len, "%s \"%s\".",
             msg_hash_to_str(MSG_FAILED_TO_UNDO_LOAD_STATE),
@@ -1370,10 +1443,12 @@ size_t command_event_save_auto_state(void)
    runloop_state_t *runloop_st = runloop_state_get_ptr();
    const char *name_savestate  = runloop_st->name.savestate;
    char savestate_name_auto[PATH_MAX_LENGTH];
+   const char *a = NULL;
 
    if (!core_info_current_supports_savestate())
       return 0;
-   if (string_is_empty(path_basename(path_get(RARCH_PATH_BASENAME))))
+   a = path_basename(path_get(RARCH_PATH_BASENAME));
+   if (!a || !*a)
       return 0;
    _len = strlcpy(savestate_name_auto, name_savestate,
          sizeof(savestate_name_auto));
@@ -1561,7 +1636,7 @@ static void command_scan_states(
       const char *end      = NULL;
       const char *dir_elem = dir_list->elems[i].data;
 
-      if (string_is_empty(dir_elem))
+      if (!dir_elem || !*dir_elem)
          continue;
 
       _len = strlen(dir_elem);
@@ -1570,7 +1645,7 @@ static void command_scan_states(
       /* Only consider files with a '.state' extension
        * > i.e. Ignore '.state.auto', '.state.bak', etc. */
       ext = path_get_extension(elem_base);
-      if (    string_is_empty(ext)
+      if (    (!ext || !*ext)
           || !string_starts_with_size(ext, "state", STRLEN_CONST("state")))
          continue;
 
@@ -1769,7 +1844,7 @@ static void command_event_set_savestate_garbage_collect(settings_t *settings)
     * > Conservative behaviour, designed to minimise
     *   the risk of deleting multiple incorrect files
     *   in case of accident */
-   if (!string_is_empty(state_to_delete))
+   if (*state_to_delete)
    {
       filestream_delete(state_to_delete);
       RARCH_DBG("[State] Garbage collect, deleting \"%s\".\n",state_to_delete);
@@ -1876,7 +1951,7 @@ void command_event_set_replay_garbage_collect(
       const char *end                 = NULL;
       const char *dir_elem            = dir_list->elems[i].data;
 
-      if (string_is_empty(dir_elem))
+      if (!dir_elem || !*dir_elem)
          continue;
 
       _len = fill_pathname_base(elem_base, dir_elem, sizeof(elem_base));
@@ -1884,7 +1959,7 @@ void command_event_set_replay_garbage_collect(
       /* Only consider files with a '.replayXX' extension
        * > i.e. Ignore '.replay.auto', '.replay.bak', etc. */
       ext = path_get_extension(elem_base);
-      if (    string_is_empty(ext)
+      if (    (!ext || !*ext)
           || !string_starts_with_size(ext, "replay", STRLEN_CONST("REPLAY")))
          continue;
 
@@ -1916,7 +1991,7 @@ void command_event_set_replay_garbage_collect(
     * > Conservative behaviour, designed to minimise
     *   the risk of deleting multiple incorrect files
     *   in case of accident */
-   if (!string_is_empty(oldest_save) && (cnt > max_to_keep))
+   if (oldest_save && *oldest_save && (cnt > max_to_keep))
       filestream_delete(oldest_save);
 
    dir_list_free(dir_list);
@@ -1927,8 +2002,10 @@ bool command_set_shader(command_t *cmd, const char *arg)
 {
    enum  rarch_shader_type type = video_shader_parse_type(arg);
    settings_t  *settings        = config_get_ptr();
+   bool apply_new_shader        = arg && *arg;
 
-   if (!string_is_empty(arg))
+   configuration_set_bool(settings, settings->bools.video_shader_enable, apply_new_shader);
+   if (apply_new_shader)
    {
       gfx_ctx_flags_t flags;
       flags.flags     = 0;
@@ -1968,9 +2045,9 @@ bool command_event_save_core_config(
 
    msg[0]                          = '\0';
 
-   if (!string_is_empty(dir_menu_config))
+   if (dir_menu_config && *dir_menu_config)
       _len = strlcpy(config_dir, dir_menu_config, sizeof(config_dir));
-   else if (!string_is_empty(rarch_path_config)) /* Fallback */
+   else if (rarch_path_config && *rarch_path_config) /* Fallback */
       _len = fill_pathname_basedir(config_dir, rarch_path_config,
             sizeof(config_dir));
 
@@ -2086,7 +2163,7 @@ void command_event_save_current_config(enum override_type type)
 
             /* command_event_save_config() does its own logging */
             if (msg_cat == MESSAGE_QUEUE_CATEGORY_ERROR)
-               RARCH_ERR("[Overrides] %s\n", msg);
+               RARCH_ERR("[Override] %s\n", msg);
 
             runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
                   MESSAGE_QUEUE_ICON_DEFAULT, msg_cat);
@@ -2125,14 +2202,14 @@ void command_event_save_current_config(enum override_type type)
             switch (msg_cat)
             {
                case MESSAGE_QUEUE_CATEGORY_ERROR:
-                  RARCH_ERR("[Overrides] %s\n", msg);
+                  RARCH_ERR("[Override] %s\n", msg);
                   break;
                case MESSAGE_QUEUE_CATEGORY_WARNING:
-                  RARCH_WARN("[Overrides] %s\n", msg);
+                  RARCH_WARN("[Override] %s\n", msg);
                   break;
                case MESSAGE_QUEUE_CATEGORY_SUCCESS:
                default:
-                  RARCH_LOG("[Overrides] %s\n", msg);
+                  RARCH_LOG("[Override] %s\n", msg);
                   break;
             }
 
@@ -2180,9 +2257,9 @@ void command_event_remove_current_config(enum override_type type)
             }
 
             if (msg_cat == MESSAGE_QUEUE_CATEGORY_ERROR)
-               RARCH_ERR("[Overrides] %s\n", msg);
+               RARCH_ERR("[Override] %s\n", msg);
             else
-               RARCH_LOG("[Overrides] %s\n", msg);
+               RARCH_LOG("[Override] %s\n", msg);
 
             runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
                   MESSAGE_QUEUE_ICON_DEFAULT, msg_cat);
@@ -2335,17 +2412,6 @@ bool command_event_disk_control_append_image(
       autosave_deinit();
 #endif
 
-   /* TODO/FIXME: Need to figure out what to do with subsystems case. */
-   if (path_is_empty(RARCH_PATH_SUBSYSTEM))
-   {
-      /* Update paths for our new image.
-       * If we actually use append_image, we assume that we
-       * started out in a single disk case, and that this way
-       * of doing it makes the most sense. */
-      path_set(RARCH_PATH_NAMES, path);
-      runloop_path_fill_names();
-   }
-
    command_event(CMD_EVENT_AUTOSAVE_INIT, NULL);
 
    return true;
@@ -2374,8 +2440,70 @@ void command_event_reinit(const int flags)
    const input_device_driver_t
       *sec_joypad                 = NULL;
 #endif
+   /* Snapshot the last cached core frame before tearing the video
+    * driver down.  video_driver_free() nulls frame_cache_data as part
+    * of the reinit cycle (the pointer was borrowed from the core's
+    * own framebuffer and isn't guaranteed to stay live across the
+    * driver swap), so without a snapshot the new driver would come
+    * up with no core image to replay.  Restored + replayed below so
+    * the paused-core background remains visible when reinit is
+    * triggered from inside the menu (e.g. HDR mode toggle).
+    *
+    * The snapshot buffer is static and reused across reinits — we
+    * need it to outlive command_event_reinit because we hand the
+    * pointer to video_st->frame_cache_data for the new driver to
+    * read via video_driver_cached_frame(), and the core's next real
+    * frame will replace the pointer at its leisure.  Resizing in
+    * place on each call keeps it bounded at one buffer's worth. */
+   static void  *cached_snapshot      = NULL;
+   static size_t cached_snapshot_cap  = 0;
+   size_t        want_size            = 0;
+   unsigned      cached_snapshot_w    = 0;
+   unsigned      cached_snapshot_h    = 0;
+   size_t        cached_snapshot_p    = 0;
+
+   if (     video_st
+         && video_st->frame_cache_data
+         && video_st->frame_cache_data != RETRO_HW_FRAME_BUFFER_VALID
+         && video_st->frame_cache_height
+         && video_st->frame_cache_pitch)
+      want_size = video_st->frame_cache_pitch
+                * video_st->frame_cache_height;
+   if (want_size > cached_snapshot_cap)
+   {
+      void *tmp = realloc(cached_snapshot, want_size);
+      if (tmp)
+      {
+         cached_snapshot     = tmp;
+         cached_snapshot_cap = want_size;
+      }
+      else
+         want_size           = 0;
+   }
+   if (want_size && cached_snapshot)
+   {
+      memcpy(cached_snapshot, video_st->frame_cache_data, want_size);
+      cached_snapshot_w = video_st->frame_cache_width;
+      cached_snapshot_h = video_st->frame_cache_height;
+      cached_snapshot_p = video_st->frame_cache_pitch;
+   }
 
    video_driver_reinit(flags);
+
+   /* Restore the snapshot and ask the new driver to replay it so the
+    * paused-core background appears in the first post-reinit frame.
+    * The buffer stays live across subsequent frame_cb calls from the
+    * core (which overwrite the pointer) and is either reused on the
+    * next reinit or freed at shutdown. */
+   if (cached_snapshot_p && cached_snapshot_h)
+   {
+      video_st->frame_cache_data   = cached_snapshot;
+      video_st->frame_cache_width  = cached_snapshot_w;
+      video_st->frame_cache_height = cached_snapshot_h;
+      video_st->frame_cache_pitch  = cached_snapshot_p;
+      video_driver_cached_frame();
+   }
+
    /* Poll input to avoid possibly stale data to corrupt things. */
    if (joypad && joypad->poll)
       joypad->poll();

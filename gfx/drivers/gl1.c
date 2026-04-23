@@ -131,6 +131,7 @@ typedef struct gl1
    unsigned char *menu_frame;
    unsigned char *video_buf;
    unsigned char *menu_video_buf;
+   size_t menu_frame_cap;
 
    int version_major;
    int version_minor;
@@ -526,6 +527,8 @@ static void *gl1_raster_font_init(void *data,
 static int gl1_raster_font_get_message_width(void *data, const char *msg,
       size_t msg_len, float scale)
 {
+   void *font_data;
+   const struct font_glyph* (*get_glyph)(void*, uint32_t);
    const struct font_glyph* glyph_q = NULL;
    gl1_raster_t *font  = (gl1_raster_t*)data;
    const char* msg_end = msg + msg_len;
@@ -536,16 +539,17 @@ static int gl1_raster_font_get_message_width(void *data, const char *msg,
          || !font->font_data )
       return 0;
 
-   glyph_q = font->font_driver->get_glyph(font->font_data, '?');
+   get_glyph = font->font_driver->get_glyph;
+   font_data = font->font_data;
+   glyph_q   = get_glyph(font_data, '?');
 
    while (msg < msg_end)
    {
       const struct font_glyph *glyph;
-      unsigned code                  = utf8_walk(&msg);
+      unsigned code = utf8_walk(&msg);
 
       /* Do something smarter here ... */
-      if (!(glyph = font->font_driver->get_glyph(
-            font->font_data, code)))
+      if (!(glyph = get_glyph(font_data, code)))
          if (!(glyph = glyph_q))
             continue;
 
@@ -641,15 +645,32 @@ static void gl1_raster_font_render_line(gl1_t *gl,
    int y                = roundf(pos_y * gl->vp.height);
    int delta_x          = 0;
    int delta_y          = 0;
+   const struct font_glyph* (*get_glyph)(void*, uint32_t) = font->font_driver->get_glyph;
+   void *font_data      = font->font_data;
 
-   switch (text_align)
+   /* For right/center alignment, compute width with a lightweight pass
+    * that only accumulates advance_x — avoids the redundant glyph lookups
+    * and atlas dirty checks that gl1_raster_font_get_message_width 
+    * would repeat. */
+   if (text_align == TEXT_ALIGN_RIGHT || text_align == TEXT_ALIGN_CENTER)
    {
-      case TEXT_ALIGN_RIGHT:
-         x -= gl1_raster_font_get_message_width(font, msg, msg_len, scale);
-         break;
-      case TEXT_ALIGN_CENTER:
-         x -= gl1_raster_font_get_message_width(font, msg, msg_len, scale) / 2.0;
-         break;
+      int width_accum      = 0;
+      const char *scan     = msg;
+      const char *scan_end = msg_end;
+      while (scan < scan_end)
+      {
+         const struct font_glyph *glyph;
+         uint32_t code       = utf8_walk(&scan);
+         if (!(glyph = get_glyph(font_data, code)))
+            if (!(glyph = glyph_q))
+               continue;
+         width_accum += glyph->advance_x;
+      }
+
+      if (text_align == TEXT_ALIGN_RIGHT)
+         x -= (int)(width_accum * scale);
+      else
+         x -= (int)(width_accum * scale) / 2;
    }
 
    while (msg < msg_end)
@@ -662,8 +683,7 @@ static void gl1_raster_font_render_line(gl1_t *gl,
          unsigned                  code = utf8_walk(&msg);
 
          /* Do something smarter here ... */
-         if (!(glyph = font->font_driver->get_glyph(
-               font->font_data, code)))
+         if (!(glyph = get_glyph(font_data, code)))
             if (!(glyph = glyph_q))
                continue;
 
@@ -717,12 +737,13 @@ static void gl1_raster_font_render_message(gl1_t *gl,
    int x                                  = roundf(pos_x * gl->vp.width);
    font->font_driver->get_line_metrics(font->font_data, &line_metrics);
    line_height = line_metrics->height * scale / gl->vp.height;
-
    for (;;)
    {
-      const char *delim = strchr(msg, '\n');
-      size_t msg_len    = delim ? (size_t)(delim - msg) : strlen(msg);
-
+      size_t msg_len;
+      const char *p = msg;
+      while (*p && *p != '\n')
+         p++;
+      msg_len = p - msg;
       /* Draw the line */
       gl1_raster_font_render_line(gl, font, glyph_q,
             msg, msg_len, scale, color, pos_x,
@@ -733,11 +754,9 @@ static void gl1_raster_font_render_message(gl1_t *gl,
             inv_win_width,
             inv_win_height,
             text_align);
-
-      if (!delim)
+      if (!*p)
          break;
-
-      msg += msg_len + 1;
+      msg = p + 1;
       lines++;
    }
 }
@@ -768,7 +787,7 @@ static void gl1_raster_font_render_msg(
    gl1_raster_t               *font = (gl1_raster_t*)data;
    gl1_t *gl                        = (gl1_t*)userdata;
 
-   if (!font || string_is_empty(msg) || !gl)
+   if (!font || !msg || !*msg || !gl)
       return;
 
    if (params)
@@ -830,7 +849,7 @@ static void gl1_raster_font_render_msg(
       if (!font->block)
          gl1_raster_font_setup_viewport(gl, width, height, font, full_screen);
 
-      if (!string_is_empty(msg)
+      if (msg && *msg
             && font->font_data  && font->font_driver)
       {
          if (drop_x || drop_y)
@@ -878,7 +897,7 @@ static const struct font_glyph *gl1_raster_font_get_glyph(
 {
    gl1_raster_t *font = (gl1_raster_t*)data;
    if (font && font->font_driver)
-      return font->font_driver->get_glyph((void*)font->font_driver, code);
+      return font->font_driver->get_glyph((void*)font->font_data, code);
    return NULL;
 }
 
@@ -1196,17 +1215,22 @@ static void *gl1_init(const video_info_t *video,
    version  = (const char*)glGetString(GL_VERSION);
    extensions = (const char*)glGetString(GL_EXTENSIONS);
 
-   if (!string_is_empty(version))
-      sscanf(version, "%d.%d", &gl1->version_major, &gl1->version_minor);
+   if (version && *version)
+   {
+      char *end           = NULL;
+      gl1->version_major  = (int)strtol(version, &end, 10);
+      if (end && *end == '.')
+         gl1->version_minor = (int)strtol(end + 1, NULL, 10);
+   }
 
-   if (!string_is_empty(extensions))
+   if (extensions && *extensions)
       gl1->extensions = string_split(extensions, " ");
 
    RARCH_LOG("[GL1] Vendor: %s, Renderer: %s.\n", vendor, renderer);
    RARCH_LOG("[GL1] Version: %s.\n", version);
    RARCH_LOG("[GL1] Extensions: %s.\n", extensions);
 
-   if (!string_is_empty(version))
+   if (version && *version)
       video_driver_set_gpu_api_version_string(version);
 
    if (gl1->ctx_driver->input_driver)
@@ -1953,10 +1977,28 @@ static bool gl1_read_viewport(void *data, uint8_t *buffer, bool is_idle)
    if (!is_idle)
       video_driver_cached_frame();
 
-   video_frame_convert_rgba_to_bgr(
-         (const void*)gl1->readback_buffer_screenshot,
-         buffer,
-         num_pixels);
+   {
+      /* Clamp to the region glReadPixels actually wrote.
+       * gl1_readback() clamps its read to
+       * min(vp.{w,h}, video_{width,height}), where video_{width,height}
+       * come from video_info and ultimately video_driver_get_size().
+       * gl1->video_{width,height} holds the core's frame size, not the
+       * window size, so we re-query here to match. Not a hot path. */
+      unsigned vd_w = 0;
+      unsigned vd_h = 0;
+      unsigned rb_w = 0;
+      unsigned rb_h = 0;
+      video_driver_get_size(&vd_w, &vd_h);
+      rb_w = (gl1->vp.width  > vd_w) ? vd_w : gl1->vp.width;
+      rb_h = (gl1->vp.height > vd_h) ? vd_h : gl1->vp.height;
+      video_frame_convert_rgba_to_bgr(
+            (const void*)gl1->readback_buffer_screenshot,
+            buffer,
+            rb_w * sizeof(uint32_t),
+            rb_w * 3,
+            rb_w,
+            rb_h);
+   }
 
    free(gl1->readback_buffer_screenshot);
    gl1->readback_buffer_screenshot = NULL;
@@ -1970,10 +2012,11 @@ static void gl1_set_texture_frame(void *data,
 {
    settings_t *settings      = config_get_ptr();
    bool menu_linear_filter   = settings->bools.menu_linear_filter;
-   unsigned       pitch      = width * 2;
+   unsigned pitch            = width * (rgb32 ? 4 : 2);
    gl1_t              *gl1   = (gl1_t*)data;
+   size_t required;
 
-   if (!gl1)
+   if (!gl1 || !frame || !width || !height || !pitch)
       return;
 
    if (menu_linear_filter)
@@ -1981,64 +2024,35 @@ static void gl1_set_texture_frame(void *data,
    else
       gl1->flags            &= ~GL1_FLAG_MENU_SMOOTH;
 
-   if (rgb32)
-      pitch                  = width * 4;
+   required = (size_t)pitch * (size_t)height;
 
-   if (gl1->menu_frame)
-      free(gl1->menu_frame);
-   gl1->menu_frame           = NULL;
-
-   if (     (!gl1->menu_frame)
-         || (gl1->menu_width  != width)
-         || (gl1->menu_height != height)
-         || (gl1->menu_pitch  != pitch))
+   if (required > gl1->menu_frame_cap)
    {
-      if (pitch && height)
-      {
-         if (gl1->menu_frame)
-            free(gl1->menu_frame);
-
-         /* FIXME? We have to assume the pitch has no
-          * extra padding in it because that will
-          * mess up the POT calculation when we don't
-          * know how many bpp there are. */
-         gl1->menu_frame = (unsigned char*)malloc(pitch * height);
-      }
+      /* FIXME? We have to assume the pitch has no
+       * extra padding in it because that will
+       * mess up the POT calculation when we don't
+       * know how many bpp there are. */
+      unsigned char *tmp = (unsigned char*)realloc(
+            gl1->menu_frame, required);
+      if (!tmp)
+         return;                        /* keep previous frame intact */
+      gl1->menu_frame     = tmp;
+      gl1->menu_frame_cap = required;
    }
 
-   if (gl1->menu_frame && frame && pitch && height)
-   {
-      memcpy(gl1->menu_frame, frame, pitch * height);
-      gl1->menu_width        = width;
-      gl1->menu_height       = height;
-      gl1->menu_pitch        = pitch;
-      gl1->menu_bits         = rgb32 ? 32 : 16;
-      gl1->flags            |= GL1_FLAG_MENU_SIZE_CHANGED;
-   }
-}
+   /* Only set MENU_SIZE_CHANGED when the dimensions the downstream
+    * frame path cares about actually change; otherwise the POT-sized
+    * menu_video_buf would get reallocated on every single frame. */
+   if (     gl1->menu_width  != width
+         || gl1->menu_height != height
+         || gl1->menu_pitch  != pitch)
+      gl1->flags |= GL1_FLAG_MENU_SIZE_CHANGED;
 
-static void gl1_get_video_output_size(void *data,
-      unsigned *width, unsigned *height, char *desc, size_t desc_len)
-{
-   gl1_t *gl         = (gl1_t*)data;
-   if (gl && gl->ctx_driver && gl->ctx_driver->get_video_output_size)
-      gl->ctx_driver->get_video_output_size(
-            gl->ctx_data,
-            width, height, desc, desc_len);
-}
-
-static void gl1_get_video_output_prev(void *data)
-{
-   gl1_t *gl         = (gl1_t*)data;
-   if (gl && gl->ctx_driver && gl->ctx_driver->get_video_output_prev)
-      gl->ctx_driver->get_video_output_prev(gl->ctx_data);
-}
-
-static void gl1_get_video_output_next(void *data)
-{
-   gl1_t *gl         = (gl1_t*)data;
-   if (gl && gl->ctx_driver && gl->ctx_driver->get_video_output_next)
-      gl->ctx_driver->get_video_output_next(gl->ctx_data);
+   memcpy(gl1->menu_frame, frame, required);
+   gl1->menu_width  = width;
+   gl1->menu_height = height;
+   gl1->menu_pitch  = pitch;
+   gl1->menu_bits   = rgb32 ? 32 : 16;
 }
 
 static void gl1_set_video_mode(void *data, unsigned width, unsigned height,
@@ -2067,7 +2081,7 @@ static void gl1_load_texture_data(
       const void *frame, unsigned base_size)
 {
    GLint filter;
-   bool use_rgba    = video_driver_supports_rgba();
+   bool use_rgba    = (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA);
    bool rgb32       = (base_size == (sizeof(uint32_t)));
    GLenum wrap      = gl1_wrap_type_to_enum(wrap_type);
 
@@ -2151,25 +2165,34 @@ static void video_texture_load_gl1(
 }
 
 #ifdef HAVE_THREADS
-static int video_texture_load_wrap_gl1(void *data)
+typedef struct
 {
-   uintptr_t id = 0;
-   gl1_t   *gl1 = (gl1_t*)video_driver_get_ptr();
+   gl1_t     *gl;
+   void      *payload;
+} gl1_texture_cmd_t;
 
-   if (gl1->ctx_driver->make_current)
+static uintptr_t video_texture_load_wrap_gl1(void *data)
+{
+   uintptr_t id             = 0;
+   gl1_texture_cmd_t *cmd   = (gl1_texture_cmd_t*)data;
+   gl1_t             *gl1   = cmd->gl;
+   void              *image = cmd->payload;
+
+   if (gl1 && gl1->ctx_driver->make_current)
       gl1->ctx_driver->make_current(false);
 
-   if (data)
-      video_texture_load_gl1((struct texture_image*)data,
+   if (image)
+      video_texture_load_gl1((struct texture_image*)image,
             TEXTURE_FILTER_NEAREST, &id);
    return (int)id;
 }
 
-static int video_texture_unload_wrap_gl1(void *data)
+static uintptr_t video_texture_unload_wrap_gl1(void *data)
 {
    GLuint  glid;
-   uintptr_t id = (uintptr_t)data;
-   gl1_t   *gl1 = (gl1_t*)video_driver_get_ptr();
+   gl1_texture_cmd_t *cmd = (gl1_texture_cmd_t*)data;
+   gl1_t             *gl1 = cmd->gl;
+   uintptr_t          id  = (uintptr_t)cmd->payload;
 
    if (gl1 && gl1->ctx_driver->make_current)
       gl1->ctx_driver->make_current(false);
@@ -2188,9 +2211,13 @@ static uintptr_t gl1_load_texture(void *video_data, void *data,
 #ifdef HAVE_THREADS
    if (threaded)
    {
+      gl1_texture_cmd_t cmd;
       custom_command_method_t func = video_texture_load_wrap_gl1;
 
-      return video_thread_texture_handle(data, func);
+      cmd.gl      = (gl1_t*)video_data;
+      cmd.payload = data;
+
+      return video_thread_texture_handle(&cmd, func);
    }
 #endif
 
@@ -2215,22 +2242,19 @@ static void gl1_unload_texture(void *data,
 #ifdef HAVE_THREADS
    if (threaded)
    {
+      gl1_texture_cmd_t cmd;
       custom_command_method_t func = video_texture_unload_wrap_gl1;
-      video_thread_texture_handle((void *)id, func);
+
+      cmd.gl      = (gl1_t*)data;
+      cmd.payload = (void*)id;
+
+      video_thread_texture_handle(&cmd, func);
       return;
    }
 #endif
 
    glid = (GLuint)id;
    glDeleteTextures(1, &glid);
-}
-
-static float gl1_get_refresh_rate(void *data)
-{
-   float refresh_rate = 0.0f;
-   if (video_context_driver_get_refresh_rate(&refresh_rate))
-      return refresh_rate;
-   return 0.0f;
 }
 
 static void gl1_set_texture_enable(void *data, bool state, bool full_screen)
@@ -2267,11 +2291,11 @@ static const video_poke_interface_t gl1_poke_interface = {
    gl1_load_texture,
    gl1_unload_texture,
    gl1_set_video_mode,
-   gl1_get_refresh_rate,
+   NULL, /* refresh_rate - handled by display server */
    NULL, /* set_filtering */
-   gl1_get_video_output_size,
-   gl1_get_video_output_prev,
-   gl1_get_video_output_next,
+   NULL, /* video_output_size - handled by display server */
+   NULL, /* video_output_prev - handled by display server */
+   NULL, /* video_output_next - handled by display server */
    NULL, /* get_current_framebuffer */
    NULL, /* get_proc_address */
    gl1_set_aspect_ratio,
@@ -2284,10 +2308,11 @@ static const video_poke_interface_t gl1_poke_interface = {
    NULL, /* get_current_shader */
    NULL, /* get_current_software_framebuffer */
    NULL, /* get_hw_render_interface */
-   NULL, /* set_hdr_max_nits */
+   NULL, /* set_hdr_menu_nits */
    NULL, /* set_hdr_paper_white_nits */
-   NULL, /* set_hdr_contrast */
-   NULL  /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void gl1_get_poke_interface(void *data,
@@ -2461,6 +2486,8 @@ video_driver_t video_gl1 = {
 #endif
    gl1_get_poke_interface,
    gl1_wrap_type_to_enum,
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
 #ifdef HAVE_GFX_WIDGETS
    gl1_widgets_enabled
 #endif

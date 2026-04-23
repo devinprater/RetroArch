@@ -44,6 +44,7 @@
 #include "../../performance_counters.h"
 #include "../../playlist.h"
 #include "../../manual_content_scan.h"
+#include "../../msg_hash_lbl_str.h"
 
 #include "../../audio/audio_driver.h"
 #include "../../input/input_remapping.h"
@@ -131,7 +132,7 @@ static int action_start_shader_parameters(
    generic_action_ok_displaylist_push(
          msg_hash_to_str(MENU_ENUM_LABEL_VALUE_VIDEO_SHADER_PARAMETERS),
          NULL,
-         msg_hash_to_str(MENU_ENUM_LABEL_VIDEO_SHADER_PARAMETERS),
+         MENU_ENUM_LABEL_VIDEO_SHADER_PARAMETERS_STR,
          MENU_SETTING_ACTION,
          idx, 0, ACTION_OK_DL_GENERIC);
 #endif
@@ -147,7 +148,7 @@ static int action_start_video_filter_file_load(
    if (!settings)
       return -1;
 
-   if (!string_is_empty(settings->paths.path_softfilter_plugin))
+   if (*settings->paths.path_softfilter_plugin)
    {
       struct menu_state *menu_st      = menu_state_get_ptr();
       /* Unload video filter */
@@ -171,7 +172,7 @@ static int action_start_audio_dsp_plugin_file_load(
    if (!settings)
       return -1;
 
-   if (!string_is_empty(settings->paths.path_audio_dsp_plugin))
+   if (*settings->paths.path_audio_dsp_plugin)
    {
       struct menu_state *menu_st      = menu_state_get_ptr();
       /* Unload DSP plugin filter */
@@ -226,8 +227,8 @@ static int action_start_input_desc(
 
    if (settings && sys_info)
    {
-      unsigned user_idx    = (type - MENU_SETTINGS_INPUT_DESC_BEGIN) / (RARCH_FIRST_CUSTOM_BIND + 8);
-      unsigned btn_idx     = (type - MENU_SETTINGS_INPUT_DESC_BEGIN) - (RARCH_FIRST_CUSTOM_BIND + 8) * user_idx;
+      unsigned user_idx    = (type - MENU_SETTINGS_INPUT_DESC_BEGIN) / RARCH_ANALOG_BIND_LIST_END;
+      unsigned btn_idx     = (type - MENU_SETTINGS_INPUT_DESC_BEGIN) - RARCH_ANALOG_BIND_LIST_END * user_idx;
       unsigned mapped_port = settings->uints.input_remap_ports[user_idx];
 
       if (     (user_idx    >= MAX_USERS)
@@ -236,7 +237,7 @@ static int action_start_input_desc(
          return 0;
 
       /* Check whether core has defined this input */
-      if (!string_is_empty(sys_info->input_desc_btn[mapped_port][btn_idx]))
+      if (sys_info->input_desc_btn[mapped_port][btn_idx] && *sys_info->input_desc_btn[mapped_port][btn_idx])
       {
          const struct retro_keybind *keyptr = &input_config_binds[user_idx][btn_idx];
          settings->uints.input_remap_ids[user_idx][btn_idx] = keyptr->id;
@@ -367,22 +368,6 @@ static int action_start_shader_num_passes(
       unsigned type, size_t idx, size_t entry_idx)
 {
    return menu_shader_manager_clear_num_passes(menu_shader_get());
-}
-#endif
-
-#ifdef HAVE_CHEATS
-static int action_start_cheat_num_passes(
-      const char *path, const char *label,
-      unsigned type, size_t idx, size_t entry_idx)
-{
-   if (cheat_manager_get_size())
-   {
-      struct menu_state *menu_st  = menu_state_get_ptr();
-      menu_st->flags             |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
-      cheat_manager_realloc(0, CHEAT_HANDLER_TYPE_EMU);
-   }
-
-   return 0;
 }
 #endif
 
@@ -549,13 +534,45 @@ static int action_start_manual_content_scan_dir(
    return 0;
 }
 
+static int action_start_scan_method(
+      const char *path, const char *label,
+      unsigned type, size_t idx, size_t entry_idx)
+{
+   struct menu_state *menu_st = menu_state_get_ptr();
+   manual_content_scan_set_menu_scan_method(MANUAL_CONTENT_SCAN_METHOD_AUTOMATIC);
+   menu_st->flags             |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+   return 0;
+}
+
+static int action_start_scan_use_db(
+      const char *path, const char *label,
+      unsigned type, size_t idx, size_t entry_idx)
+{
+   struct menu_state *menu_st = menu_state_get_ptr();
+   manual_content_scan_set_menu_scan_use_db(MANUAL_CONTENT_SCAN_USE_DB_STRICT);
+   menu_st->flags             |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+   return 0;
+}
+
+static int action_start_scan_db_select(
+      const char *path, const char *label,
+      unsigned type, size_t idx, size_t entry_idx)
+{
+   struct menu_state *menu_st = menu_state_get_ptr();
+   manual_content_scan_set_menu_scan_db_select(MANUAL_CONTENT_SCAN_SELECT_DB_AUTO, "");
+   menu_st->flags             |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+   return 0;
+}
+
 static int action_start_manual_content_scan_system_name(
       const char *path, const char *label,
       unsigned type, size_t idx, size_t entry_idx)
 {
+   struct menu_state *menu_st = menu_state_get_ptr();
    /* Reset system name */
    manual_content_scan_set_menu_system_name(
-         MANUAL_CONTENT_SCAN_SYSTEM_NAME_CONTENT_DIR, "");
+         MANUAL_CONTENT_SCAN_SYSTEM_NAME_AUTO, "");
+   menu_st->flags             |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
    return 0;
 }
 
@@ -597,7 +614,7 @@ static int action_start_video_resolution(
       else
 #endif
       {
-         if (!string_is_empty(desc))
+         if (*desc)
             _len = snprintf(msg, sizeof(msg), msg_hash_to_str(MSG_SCREEN_RESOLUTION_RESETTING_DESC),
                width, height, desc);
          else
@@ -655,6 +672,22 @@ static int action_start_bluetooth(const char *path, const char *label,
 }
 #endif
 
+static int action_start_core_load(
+      const char *path, const char *label,
+      unsigned type, size_t idx, size_t entry_idx)
+{
+   settings_t *settings = config_get_ptr();
+   char core_path[PATH_MAX_LENGTH];
+
+   fill_pathname_join_special(core_path,
+         settings->paths.directory_libretro,
+         path,
+         sizeof(core_path));
+
+   return action_ok_push_core_information_list(
+         core_path, label, type, idx, entry_idx);
+}
+
 #ifdef HAVE_NETWORKING
 static int action_start_core_updater_entry(
       const char *path, const char *label,
@@ -667,7 +700,7 @@ static int action_start_core_updater_entry(
     * information menu */
    if (   core_list
        && core_updater_list_get_filename(core_list, path, &entry)
-       && !string_is_empty(entry->local_core_path)
+       && (entry->local_core_path && *entry->local_core_path)
        && path_is_valid(entry->local_core_path))
       return action_ok_push_core_information_list(
             entry->local_core_path, label, type, idx, entry_idx);
@@ -684,10 +717,8 @@ static int action_start_core_lock(
    const char *core_path      = path;
    struct menu_state *menu_st = menu_state_get_ptr();
    int ret                    = 0;
-
-   if (string_is_empty(core_path))
+   if (!core_path || !*core_path)
       return -1;
-
    /* Core should be unlocked by default
     * > If it is currently unlocked, do nothing */
    if (!core_info_get_core_lock(core_path, true))
@@ -714,7 +745,7 @@ static int action_start_core_lock(
       /* Build error message */
       _len = strlcpy(msg, msg_hash_to_str(MSG_CORE_UNLOCK_FAILED), sizeof(msg));
 
-      if (!string_is_empty(core_name))
+      if (core_name && *core_name)
          _len += strlcpy(msg + _len, core_name, sizeof(msg) - _len);
 
       /* Generate log + notification */
@@ -741,10 +772,8 @@ static int action_start_core_set_standalone_exempt(
       unsigned type, size_t idx, size_t entry_idx)
 {
    const char *core_path = path;
-
-   if (string_is_empty(core_path))
+   if (!core_path || !*core_path)
       return -1;
-
    /* Core should not be exempt by default
     * > If it is currently 'not exempt', do nothing */
    if (core_info_get_core_standalone_exempt(core_path))
@@ -772,7 +801,7 @@ static int action_start_core_set_standalone_exempt(
                msg_hash_to_str(MSG_CORE_UNSET_STANDALONE_EXEMPT_FAILED),
                sizeof(msg));
 
-         if (!string_is_empty(core_name))
+         if (core_name && *core_name)
             _len += strlcpy(msg + _len, core_name, sizeof(msg) - _len);
 
          /* Generate log + notification */
@@ -808,7 +837,6 @@ static int menu_cbs_init_bind_start_compare_label(menu_file_list_cbs_t *cbs)
          case MENU_ENUM_LABEL_RESTART_CONTENT:
             BIND_ACTION_START(cbs, action_start_restart_content);
             break;
-         case MENU_ENUM_LABEL_VIDEO_SHADER_PRESET_MANAGER:
          case MENU_ENUM_LABEL_VIDEO_SHADER_PRESET:
          case MENU_ENUM_LABEL_VIDEO_SHADER_PRESET_PREPEND:
          case MENU_ENUM_LABEL_VIDEO_SHADER_PRESET_APPEND:
@@ -856,11 +884,6 @@ static int menu_cbs_init_bind_start_compare_label(menu_file_list_cbs_t *cbs)
             BIND_ACTION_START(cbs, action_start_shader_num_passes);
 #endif
             break;
-         case MENU_ENUM_LABEL_CHEAT_NUM_PASSES:
-#ifdef HAVE_CHEATS
-            BIND_ACTION_START(cbs, action_start_cheat_num_passes);
-#endif
-            break;
          case MENU_ENUM_LABEL_SCREEN_RESOLUTION:
             BIND_ACTION_START(cbs, action_start_video_resolution);
             break;
@@ -884,6 +907,15 @@ static int menu_cbs_init_bind_start_compare_label(menu_file_list_cbs_t *cbs)
             break;
          case MENU_ENUM_LABEL_MANUAL_CONTENT_SCAN_DIR:
             BIND_ACTION_START(cbs, action_start_manual_content_scan_dir);
+            break;
+         case MENU_ENUM_LABEL_SCAN_METHOD:
+            BIND_ACTION_START(cbs, action_start_scan_method);
+            break;
+         case MENU_ENUM_LABEL_SCAN_USE_DB:
+            BIND_ACTION_START(cbs, action_start_scan_use_db);
+            break;
+         case MENU_ENUM_LABEL_SCAN_DB_SELECT:
+            BIND_ACTION_START(cbs, action_start_scan_db_select);
             break;
          case MENU_ENUM_LABEL_MANUAL_CONTENT_SCAN_SYSTEM_NAME:
             BIND_ACTION_START(cbs, action_start_manual_content_scan_system_name);
@@ -969,6 +1001,9 @@ static int menu_cbs_init_bind_start_compare_type(menu_file_list_cbs_t *cbs,
       {
          case FILE_TYPE_PLAYLIST_COLLECTION:
             BIND_ACTION_START(cbs, action_ok_push_playlist_manager_settings);
+            break;
+         case FILE_TYPE_CORE:
+            BIND_ACTION_START(cbs, action_start_core_load);
             break;
 #ifdef HAVE_NETWORKING
          case FILE_TYPE_DOWNLOAD_CORE:

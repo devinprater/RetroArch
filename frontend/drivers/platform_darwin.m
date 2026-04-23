@@ -19,14 +19,20 @@
 #include <stddef.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <sys/utsname.h>
 
 #include <mach/mach.h>
+#ifdef HAVE_GCD
+#include <dispatch/dispatch.h>
+#endif
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFArray.h>
+#if !defined(OSX) || (MAC_OS_X_VERSION_MAX_ALLOWED >= 101400)
 #import <AVFoundation/AVFoundation.h>
+#endif
 
 #ifdef HAVE_CONFIG_H
 #include "../../config.h"
@@ -119,11 +125,30 @@ typedef enum
    CFAllDomainsMask     = 0x0ffff  /* All domains: all of the above and future items */
 } CFDomainMask;
 
-#if (defined(OSX) && (MAC_OS_X_VERSION_MAX_ALLOWED >= 101200))
+#if defined(OSX)
 static int speak_pid                            = 0;
 #endif
 
 static char darwin_cpu_model_name[64] = {0};
+
+#ifdef HAVE_GCD
+/* Directory watching implementation using GCD dispatch sources */
+typedef struct darwin_watch_entry
+{
+   int fd;                    /* File descriptor opened with O_EVTONLY */
+   dispatch_source_t source;  /* GCD dispatch source for monitoring */
+   char *path;                /* Watched file path */
+} darwin_watch_entry_t;
+
+typedef struct darwin_watch_data
+{
+   dispatch_queue_t queue;       /* Dispatch queue for event handlers */
+   darwin_watch_entry_t *watches; /* Array of watch entries */
+   size_t watch_count;           /* Number of active watches */
+   volatile int32_t has_changes; /* Atomic flag indicating changes occurred */
+   int flags;                    /* Event flags to monitor */
+} darwin_watch_data_t;
+#endif
 
 static void CFSearchPathForDirectoriesInDomains(
       char *s, size_t len)
@@ -419,14 +444,36 @@ static void frontend_darwin_get_env(int *argc, char *argv[],
 #endif
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_DATABASE], application_data, "database/rdb", sizeof(g_defaults.dirs[DEFAULT_DIR_DATABASE]));
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_CORE_ASSETS], application_data, "downloads", sizeof(g_defaults.dirs[DEFAULT_DIR_CORE_ASSETS]));
-   NSURL *url = [[NSBundle mainBundle] URLForResource:nil withExtension:@"dsp" subdirectory:@"filters/audio"];
+   /* -[NSBundle URLForResource:withExtension:subdirectory:] is 10.6+
+    * (NS_AVAILABLE(10_6, 4_0)).  On 10.5 Leopard the selector doesn't
+    * exist and the runtime throws "unrecognized selector".  Guard
+    * with respondsToSelector: and fall through to the existing
+    * fill_pathname_join fallback on older systems, which simply
+    * won't do bundle-shipped filter auto-discovery. */
+   NSURL *url = nil;
+   SEL url_for_resource_sel = @selector(URLForResource:withExtension:subdirectory:);
+   if ([[NSBundle mainBundle] respondsToSelector:url_for_resource_sel])
+      url = [[NSBundle mainBundle] URLForResource:nil withExtension:@"dsp" subdirectory:@"filters/audio"];
    if (url)
-       strlcpy(g_defaults.dirs[DEFAULT_DIR_AUDIO_FILTER], [[url baseURL] fileSystemRepresentation],  sizeof(g_defaults.dirs[DEFAULT_DIR_AUDIO_FILTER]));
+       /* URLForResource: with a nil name returns a URL pointing at
+        * the first matching .dsp file.  What we want is the directory
+        * it lives in, so strip the last path component.
+        *
+        * The previous code used [[url baseURL] fileSystemRepresentation],
+        * which was wrong on two counts: -baseURL returns nil for URLs
+        * constructed absolutely (which is what URLForResource: returns),
+        * so the result was a NULL source pointer into strlcpy; and on
+        * pre-10.9 SDKs NSURL doesn't declare -fileSystemRepresentation,
+        * so GCC resolved the selector against NSString's version with
+        * an incompatible-receiver warning. */
+       strlcpy(g_defaults.dirs[DEFAULT_DIR_AUDIO_FILTER], [[[url path] stringByDeletingLastPathComponent] UTF8String], sizeof(g_defaults.dirs[DEFAULT_DIR_AUDIO_FILTER]));
    else
        fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_AUDIO_FILTER], application_data, "filters/audio", sizeof(g_defaults.dirs[DEFAULT_DIR_AUDIO_FILTER]));
-   url = [[NSBundle mainBundle] URLForResource:nil withExtension:@"filt" subdirectory:@"filters/video"];
+   url = nil;
+   if ([[NSBundle mainBundle] respondsToSelector:url_for_resource_sel])
+      url = [[NSBundle mainBundle] URLForResource:nil withExtension:@"filt" subdirectory:@"filters/video"];
    if (url)
-       strlcpy(g_defaults.dirs[DEFAULT_DIR_VIDEO_FILTER], [[url baseURL] fileSystemRepresentation],  sizeof(g_defaults.dirs[DEFAULT_DIR_VIDEO_FILTER]));
+       strlcpy(g_defaults.dirs[DEFAULT_DIR_VIDEO_FILTER], [[[url path] stringByDeletingLastPathComponent] UTF8String], sizeof(g_defaults.dirs[DEFAULT_DIR_VIDEO_FILTER]));
    else
        fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_VIDEO_FILTER], application_data, "filters/video", sizeof(g_defaults.dirs[DEFAULT_DIR_VIDEO_FILTER]));
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_CORE_INFO], application_data, "info", sizeof(g_defaults.dirs[DEFAULT_DIR_CORE_INFO]));
@@ -475,104 +522,6 @@ static void frontend_darwin_get_env(int *argc, char *argv[],
 
    if (!path_is_directory(g_defaults.dirs[DEFAULT_DIR_MENU_CONFIG]))
       path_mkdir(g_defaults.dirs[DEFAULT_DIR_MENU_CONFIG]);
-}
-
-static int frontend_darwin_get_rating(void)
-{
-   char model[PATH_MAX_LENGTH] = {0};
-
-   frontend_darwin_get_name(model, sizeof(model));
-
-   /* iPhone 4S */
-   if (strstr(model, "iPhone4,1"))
-      return 8;
-
-   /* iPad 2/iPad Mini 1 */
-   if (strstr(model, "iPad2"))
-      return 9;
-
-   /* iPhone 5/5C */
-   if (strstr(model, "iPhone5"))
-      return 13;
-
-   /* iPhone 5S */
-   if (strstr(model, "iPhone6,1") || strstr(model, "iPhone6,2"))
-      return 14;
-
-   /* iPad Mini 2/3 */
-   if (     strstr(model, "iPad4,4")
-         || strstr(model, "iPad4,5")
-         || strstr(model, "iPad4,6")
-         || strstr(model, "iPad4,7")
-         || strstr(model, "iPad4,8")
-         || strstr(model, "iPad4,9")
-      )
-      return 15;
-
-   /* iPad Air */
-   if (     strstr(model, "iPad4,1")
-         || strstr(model, "iPad4,2")
-         || strstr(model, "iPad4,3")
-      )
-      return 16;
-
-   /* iPhone 6, iPhone 6 Plus */
-   if (strstr(model, "iPhone7"))
-      return 17;
-
-   /* iPad Air 2 */
-   if (strstr(model, "iPad5,3") || strstr(model, "iPad5,4"))
-      return 18;
-
-   /* iPad Pro (12.9 Inch) */
-   if (strstr(model, "iPad6,7") || strstr(model, "iPad6,8"))
-     return 19;
-
-   /* iPad Pro (9.7 Inch) */
-   if (strstr(model, "iPad6,3") || strstr(model, "iPad6,4"))
-     return 19;
-
-   /* iPad 5th Generation */
-   if (strstr(model, "iPad6,11") || strstr(model, "iPad6,12"))
-     return 19;
-
-   /* iPad Pro (12.9 Inch 2nd Generation) */
-   if (strstr(model, "iPad7,1") || strstr(model, "iPad7,2"))
-     return 19;
-
-   /* iPad Pro (10.5 Inch) */
-   if (strstr(model, "iPad7,3") || strstr(model, "iPad7,4"))
-     return 19;
-
-   /* iPad Pro 6th Generation) */
-   if (strstr(model, "iPad7,5") || strstr(model, "iPad7,6"))
-     return 19;
-
-   /* iPad Pro (11 Inch) */
-   if (     strstr(model, "iPad8,1")
-         || strstr(model, "iPad8,2")
-         || strstr(model, "iPad8,3")
-         || strstr(model, "iPad8,4")
-      )
-      return 19;
-
-   /* iPad Pro (12.9 3rd Generation) */
-    if (   strstr(model, "iPad8,5")
-        || strstr(model, "iPad8,6")
-        || strstr(model, "iPad8,7")
-        || strstr(model, "iPad8,8")
-       )
-       return 19;
-
-   /* iPad Air 3rd Generation) */
-    if (   strstr(model, "iPad11,3")
-        || strstr(model, "iPad11,4"))
-       return 19;
-
-   /* TODO/FIXME -
-      - more ratings for more systems
-      - determine rating more intelligently*/
-   return -1;
 }
 
 static enum frontend_powerstate frontend_darwin_get_powerstate(
@@ -932,10 +881,164 @@ static bool accessibility_speak_macos(int speed,
 
 #endif
 
+#ifdef HAVE_GCD
+static void frontend_darwin_watch_path_for_changes(
+      struct string_list *list, int flags,
+      path_change_data_t **change_data)
+{
+   darwin_watch_data_t *watch_data = NULL;
+
+   /* Cleanup mode - free existing watch data */
+   if (!list)
+   {
+      if (!change_data || !*change_data)
+         return;
+
+      watch_data = (darwin_watch_data_t*)((*change_data)->data);
+      if (watch_data)
+      {
+         size_t i;
+         /* Cancel and release all dispatch sources, close file descriptors */
+         for (i = 0; i < watch_data->watch_count; i++)
+         {
+            if (watch_data->watches[i].source)
+            {
+               dispatch_source_cancel(watch_data->watches[i].source);
+#if !__has_feature(objc_arc)
+               dispatch_release(watch_data->watches[i].source);
+#endif
+            }
+            if (watch_data->watches[i].fd >= 0)
+               close(watch_data->watches[i].fd);
+            if (watch_data->watches[i].path)
+               free(watch_data->watches[i].path);
+         }
+#if !__has_feature(objc_arc)
+         if (watch_data->queue)
+            dispatch_release(watch_data->queue);
+#endif
+         if (watch_data->watches)
+            free(watch_data->watches);
+         free(watch_data);
+      }
+      free(*change_data);
+      *change_data = NULL;
+      return;
+   }
+
+   /* Setup mode - create new watch data */
+   watch_data = (darwin_watch_data_t*)calloc(1, sizeof(*watch_data));
+   if (!watch_data)
+      return;
+
+   watch_data->queue = dispatch_get_global_queue(
+         DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+   watch_data->watch_count = list->size;
+   watch_data->watches = (darwin_watch_entry_t*)calloc(
+         list->size, sizeof(darwin_watch_entry_t));
+   watch_data->flags = flags;
+   watch_data->has_changes = 0;
+
+   if (!watch_data->watches)
+   {
+      free(watch_data);
+      return;
+   }
+
+   /* Convert generic flags to GCD dispatch VNODE flags */
+   {
+      unsigned long vnode_flags = 0;
+      size_t i;
+
+      if (flags & PATH_CHANGE_TYPE_MODIFIED)
+         vnode_flags |= DISPATCH_VNODE_WRITE;
+      if (flags & PATH_CHANGE_TYPE_WRITE_FILE_CLOSED)
+         vnode_flags |= DISPATCH_VNODE_ATTRIB; /* mtime changes on close */
+      if (flags & PATH_CHANGE_TYPE_FILE_MOVED)
+         vnode_flags |= DISPATCH_VNODE_RENAME;
+      if (flags & PATH_CHANGE_TYPE_FILE_DELETED)
+         vnode_flags |= DISPATCH_VNODE_DELETE;
+
+      /* Set up watch for each file in the list */
+      for (i = 0; i < list->size; i++)
+      {
+         const char *path = list->elems[i].data;
+         int fd           = open(path, O_EVTONLY);
+
+         watch_data->watches[i].fd     = fd;
+         watch_data->watches[i].source = NULL;
+         watch_data->watches[i].path   = NULL;
+
+         if (fd >= 0)
+         {
+            dispatch_source_t source;
+
+            watch_data->watches[i].path = strdup(path);
+
+            /* Create dispatch source for monitoring file events */
+            source = dispatch_source_create(
+                  DISPATCH_SOURCE_TYPE_VNODE,
+                  fd,
+                  vnode_flags,
+                  watch_data->queue);
+
+            if (source)
+            {
+               /* Set up event handler - sets atomic flag when changes occur */
+               dispatch_source_set_event_handler(source, ^{
+                  OSAtomicCompareAndSwap32(0, 1, &watch_data->has_changes);
+               });
+
+               /* Set up cancellation handler to prevent fd leak */
+               dispatch_source_set_cancel_handler(source, ^{
+                  /* File descriptor is closed in cleanup function */
+               });
+
+               watch_data->watches[i].source = source;
+               dispatch_resume(source);
+            }
+            else
+            {
+               /* Failed to create dispatch source, close fd */
+               close(fd);
+               watch_data->watches[i].fd = -1;
+            }
+         }
+      }
+   }
+
+   /* Allocate and return change_data structure */
+   *change_data = (path_change_data_t*)calloc(1, sizeof(path_change_data_t));
+   if (*change_data)
+      (*change_data)->data = watch_data;
+   else
+   {
+      /* Failed to allocate change_data, cleanup */
+      frontend_darwin_watch_path_for_changes(NULL, 0, &(path_change_data_t*){watch_data});
+   }
+}
+
+static bool frontend_darwin_check_for_path_changes(
+      path_change_data_t *change_data)
+{
+   darwin_watch_data_t *watch_data = NULL;
+
+   if (!change_data || !change_data->data)
+      return false;
+
+   watch_data = (darwin_watch_data_t*)(change_data->data);
+
+   /* Atomically read and clear the flag */
+   return OSAtomicCompareAndSwap32(1, 0, &watch_data->has_changes);
+}
+#endif
+
 static bool frontend_darwin_is_narrator_running(void)
 {
+#if !defined(OSX) || (MAC_OS_X_VERSION_MAX_ALLOWED >= 101400)
    if (@available(macOS 10.14, iOS 7, tvOS 9, *))
       return true;
+#endif
 #if OSX
    return is_narrator_running_macos();
 #else
@@ -951,6 +1054,7 @@ static bool frontend_darwin_accessibility_speak(int speed,
    else if (speed > 10)
       speed               = 10;
 
+#if !defined(OSX) || (MAC_OS_X_VERSION_MAX_ALLOWED >= 101400)
    if (@available(macOS 10.14, iOS 7, tvOS 9, *))
    {
       static dispatch_once_t once;
@@ -975,6 +1079,7 @@ static bool frontend_darwin_accessibility_speak(int speed,
       [synth speakUtterance:utterance];
       return true;
    }
+#endif
 
 #if defined(OSX)
    return accessibility_speak_macos(speed, speak_text, priority);
@@ -992,6 +1097,11 @@ static void frontend_darwin_content_loaded(void)
 #endif
 }
 
+static enum rarch_display_type frontend_darwin_get_display_type(void)
+{
+   return RARCH_DISPLAY_OSX;
+}
+
 frontend_ctx_driver_t frontend_ctx_darwin = {
    frontend_darwin_get_env,         /* get_env */
    NULL,                            /* init */
@@ -1003,7 +1113,6 @@ frontend_ctx_driver_t frontend_ctx_darwin = {
    NULL,                            /* shutdown */
    frontend_darwin_get_name,        /* get_name */
    frontend_darwin_get_os,          /* get_os               */
-   frontend_darwin_get_rating,      /* get_rating           */
    frontend_darwin_content_loaded,  /* content_loaded       */
    frontend_darwin_get_arch,        /* get_architecture     */
    frontend_darwin_get_powerstate,  /* get_powerstate       */
@@ -1018,14 +1127,20 @@ frontend_ctx_driver_t frontend_ctx_darwin = {
    NULL,                            /* detach_console */
    NULL,                            /* get_lakka_version */
    NULL,                            /* set_screen_brightness */
+#ifdef HAVE_GCD
+   frontend_darwin_watch_path_for_changes, /* watch_path_for_changes */
+   frontend_darwin_check_for_path_changes, /* check_for_path_changes */
+#else
    NULL,                            /* watch_path_for_changes */
    NULL,                            /* check_for_path_changes */
+#endif
    NULL,                            /* set_sustained_performance_mode */
    frontend_darwin_get_cpu_model_name, /* get_cpu_model_name */
    frontend_darwin_get_user_language, /* get_user_language   */
    frontend_darwin_is_narrator_running, /* is_narrator_running */
    frontend_darwin_accessibility_speak, /* accessibility_speak */
    NULL,                            /* set_gamemode        */
+   frontend_darwin_get_display_type,
    "darwin",                        /* ident               */
    NULL                             /* get_video_driver    */
 };

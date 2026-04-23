@@ -22,6 +22,7 @@
 
 #include <file/config_file.h>
 #include <file/file_path.h>
+#include <streams/file_stream.h>
 #include <compat/strl.h>
 #include <compat/posix_string.h>
 #include <string/stdstring.h>
@@ -97,17 +98,17 @@ void cheat_manager_apply_cheats(bool notification_show_cheats_applied)
          cheat_info.enabled = true;
          cheat_info.code    = cheat_st->cheats[i].code;
 
-         if (!string_is_empty(cheat_info.code))
+         if (cheat_info.code && *cheat_info.code)
             core_set_cheat(&cheat_info);
       }
    }
 
-   if (cheat_st->size > 0 && notification_show_cheats_applied)
+   if (cheat_st->size && notification_show_cheats_applied)
    {
       char msg[128];
       size_t _len = strlcpy(msg, msg_hash_to_str(MSG_APPLYING_CHEAT), sizeof(msg));
       runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
-            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_SUCCESS);
       RARCH_LOG("[Cheats] %s\n", msg);
    }
 
@@ -120,7 +121,7 @@ void cheat_manager_apply_cheats(bool notification_show_cheats_applied)
 void cheat_manager_set_code(unsigned i, const char *str)
 {
    cheat_manager_t *cheat_st = &cheat_manager_state;
-   if (!cheat_st->cheats || string_is_empty(str))
+   if (!cheat_st->cheats || !str || !*str)
       return;
 
    if (cheat_st->cheats[i].code)
@@ -169,8 +170,14 @@ bool cheat_manager_save(
       (char*)"cheat%u_repeat_add_to_address"
    };
 
-   if (!cheat_st->cheats || cheat_st->size == 0)
+   if (!cheat_st->cheats)
       return false;
+
+   if (!cheat_st->size)
+   {
+      filestream_delete(path);
+      return false;
+   }
 
    if (!cheat_database)
       strlcpy(cheats_file, path, sizeof(cheats_file));
@@ -200,7 +207,7 @@ bool cheat_manager_save(
       size_t _len = snprintf(var_key, sizeof(var_key), "cheat%u_", i);
 
       strlcpy(var_key + _len, "desc", sizeof(var_key) - _len);
-      if (!string_is_empty(cheat_st->cheats[i].desc))
+      if (cheat_st->cheats[i].desc && *cheat_st->cheats[i].desc)
          config_set_string(conf, var_key, cheat_st->cheats[i].desc);
       else
          config_set_string(conf, var_key, cheat_st->cheats[i].code);
@@ -598,27 +605,32 @@ void cheat_manager_update(cheat_manager_t *handle, unsigned handle_idx)
 {
    size_t _len;
    char msg[256];
+   enum message_queue_category msg_cat = MESSAGE_QUEUE_CATEGORY_INFO;
 
    if (!handle || !handle->cheats || handle->size == 0)
       return;
 
-   /* TODO/FIXME - localize */
    _len = snprintf(msg, sizeof(msg),
-         "Cheat: #%u [%s]: %s",
+         "%s #%u: %s: %s",
+         msg_hash_to_str(MENU_ENUM_LABEL_VALUE_CHEAT),
          handle_idx,
-         handle->cheats[handle_idx].state
-         ? msg_hash_to_str(MENU_ENUM_LABEL_ON)
-         : msg_hash_to_str(MENU_ENUM_LABEL_OFF),
          handle->cheats[handle_idx].desc
-         ? (handle->cheats[handle_idx].desc)
-         : (handle->cheats[handle_idx].code)
+            ? (handle->cheats[handle_idx].desc)
+            : (handle->cheats[handle_idx].code),
+         handle->cheats[handle_idx].state
+            ? msg_hash_to_str(MENU_ENUM_LABEL_ON)
+            : msg_hash_to_str(MENU_ENUM_LABEL_OFF)
          );
+
+   msg_cat = handle->cheats[handle_idx].state
+         ? MESSAGE_QUEUE_CATEGORY_SUCCESS : MESSAGE_QUEUE_CATEGORY_ERROR;
    runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
-         MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+         MESSAGE_QUEUE_ICON_DEFAULT, msg_cat);
    RARCH_LOG("[Cheats] %s\n", msg);
 }
 
-void cheat_manager_toggle_index(bool apply_cheats_after_toggle,
+void cheat_manager_toggle_index(
+      bool apply_cheats_after_toggle,
       bool notification_show_cheats_applied,
       unsigned i)
 {
@@ -627,7 +639,9 @@ void cheat_manager_toggle_index(bool apply_cheats_after_toggle,
       return;
 
    cheat_st->cheats[i].state = !cheat_st->cheats[i].state;
-   cheat_manager_update(cheat_st, i);
+
+   if (notification_show_cheats_applied)
+      cheat_manager_update(cheat_st, i);
 
    if (apply_cheats_after_toggle)
       cheat_manager_apply_cheats(notification_show_cheats_applied);
@@ -641,7 +655,9 @@ void cheat_manager_toggle(bool notification_show_cheats_applied)
 
    cheat_st->cheats[cheat_st->ptr].state ^= true;
    cheat_manager_apply_cheats(notification_show_cheats_applied);
-   cheat_manager_update(cheat_st, cheat_st->ptr);
+
+   if (notification_show_cheats_applied)
+      cheat_manager_update(cheat_st, cheat_st->ptr);
 }
 
 void cheat_manager_index_next(void)
@@ -705,9 +721,9 @@ static size_t cheat_manager_get_game_specific_filename(
       return 0;
    core_name = sysinfo.library_name;
    game_name = path_basename_nocompression(runloop_st->name.cheatfile);
-   if (     string_is_empty(path_cheat_database)
-         || string_is_empty(core_name)
-         || string_is_empty(game_name))
+   if (     (!path_cheat_database || !*path_cheat_database)
+         || (!core_name || !*core_name)
+         || (!game_name || !*game_name))
       return 0;
    fill_pathname_join_special(s1, path_cheat_database, core_name,
          sizeof(s1));
@@ -856,12 +872,6 @@ int cheat_manager_initialize_memory(rarch_setting_t *setting, size_t idx, bool w
    }
 
    cheat_st->num_matches = (cheat_st->total_memory_size * 8) / (1 << cheat_st->search_bit_size);
-
-#if 0
-   /* Ensure we're aligned on 4-byte boundary */
-   if (meminfo.size % 4 > 0)
-      cheat_st->total_memory_size = cheat_st->total_memory_size + (4 - (meminfo.size % 4));
-#endif
 
    if (is_search_initialization)
    {
@@ -1227,7 +1237,7 @@ int cheat_manager_add_matches(const char *path,
    {
       _len = strlcpy(msg, msg_hash_to_str(MSG_CHEAT_SEARCH_ADDED_MATCHES_TOO_MANY), sizeof(msg));
       runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
-            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
       return 0;
    }
    cheat_manager_setup_search_meta(cheat_st->search_bit_size, &bytes_per_item, &mask, &bits);
@@ -1685,13 +1695,13 @@ void cheat_manager_match_action(enum cheat_match_action_type match_action, unsig
                      {
                         const char *_msg = msg_hash_to_str(MSG_CHEAT_SEARCH_ADD_MATCH_FAIL);
                         runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
-                              MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+                              MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
                      }
                      else
                      {
                         const char *_msg = msg_hash_to_str(MSG_CHEAT_SEARCH_ADD_MATCH_SUCCESS);
                         runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
-                              MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+                              MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_SUCCESS);
                      }
                      return;
                   case CHEAT_MATCH_ACTION_TYPE_DELETE:
@@ -1706,7 +1716,7 @@ void cheat_manager_match_action(enum cheat_match_action_type match_action, unsig
                            cheat_st->num_matches--;
                         _msg = msg_hash_to_str(MSG_CHEAT_SEARCH_DELETE_MATCH_SUCCESS);
                         runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
-                              MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+                              MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_SUCCESS);
                      }
                      return;
                   }

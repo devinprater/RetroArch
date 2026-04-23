@@ -405,23 +405,24 @@ static void vga_set_texture_frame(void *data,
       float alpha)
 {
    vga_t     *vga = (vga_t*)data;
-   unsigned pitch = width * 2;
+   unsigned pitch = width * (rgb32 ? 4 : 2);
 
-   if (rgb32)
-      pitch = width * 4;
+   if (!frame || !width || !height || !pitch)
+      return;
 
-   if (vga->vga_menu_frame)
-      free(vga->vga_menu_frame);
-   vga->vga_menu_frame = NULL;
+   /* vga_menu_frame is always VGA_WIDTH*VGA_HEIGHT regardless of the
+    * incoming source frame size — the source is downscaled into this
+    * fixed-size buffer below.  Allocate once on first call and reuse
+    * thereafter; the original free+malloc per call was pure churn on
+    * a buffer whose size never changes. */
+   if (!vga->vga_menu_frame)
+   {
+      unsigned char *tmp = (unsigned char*)malloc(VGA_WIDTH * VGA_HEIGHT);
+      if (!tmp)
+         return;                        /* keep previous frame intact (NULL) */
+      vga->vga_menu_frame = tmp;
+   }
 
-   if ( !vga->vga_menu_frame ||
-         vga->vga_menu_width  != width  ||
-         vga->vga_menu_height != height ||
-         vga->vga_menu_pitch  != pitch)
-      if (pitch && height)
-         vga->vga_menu_frame = (unsigned char*)malloc(VGA_WIDTH * VGA_HEIGHT);
-
-   if (vga->vga_menu_frame && frame && pitch && height)
    {
       unsigned x, y;
 
@@ -444,6 +445,9 @@ static void vga_set_texture_frame(void *data,
             }
          }
       }
+      /* FIXME: rgb32 path does not populate vga_menu_frame - leaves
+       * stale/uninitialized content for the renderer.  Separate pre-
+       * existing bug, not fixed here. */
 
       vga->vga_menu_width  = width;
       vga->vga_menu_height = height;
@@ -476,16 +480,26 @@ static const video_poke_interface_t vga_poke_interface = {
    NULL, /* get_current_shader */
    NULL, /* get_current_software_framebuffer */
    NULL, /* get_hw_render_interface */
-   NULL, /* set_hdr_max_nits */
+   NULL, /* set_hdr_menu_nits */
    NULL, /* set_hdr_paper_white_nits */
-   NULL, /* set_hdr_contrast */
-   NULL  /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void vga_gfx_get_poke_interface(void *data,
       const video_poke_interface_t **iface) { *iface = &vga_poke_interface; }
 void vga_gfx_set_viewport(void *data, unsigned vp_width,
       unsigned vp_height, bool force_full, bool allow_rotate) { }
+
+static void vga_gfx_viewport_info(void *data, struct video_viewport *vp)
+{
+
+   vp->x = vp->y = 0;
+
+   vp->width  = vp->full_width  = VGA_WIDTH;
+   vp->height = vp->full_height = VGA_HEIGHT;
+}
 
 video_driver_t video_vga = {
    vga_gfx_init,
@@ -500,7 +514,7 @@ video_driver_t video_vga = {
    "vga",
    vga_gfx_set_viewport,
    NULL, /* set_rotation */
-   NULL, /* viewport_info */
+   vga_gfx_viewport_info,
    NULL, /* read_viewport */
    NULL, /* read_frame_raw */
 #ifdef HAVE_OVERLAY
@@ -508,6 +522,8 @@ video_driver_t video_vga = {
 #endif
    vga_gfx_get_poke_interface,
    NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
 #ifdef HAVE_GFX_WIDGETS
    NULL  /* gfx_widgets_enabled */
 #endif

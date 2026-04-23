@@ -53,6 +53,7 @@ typedef struct fpga
    RegOp regOp; /* ptr alignment */
    volatile unsigned *framebuffer;
    unsigned char *menu_frame;
+   size_t menu_frame_cap;
    unsigned menu_width;
    unsigned menu_height;
    unsigned menu_pitch;
@@ -307,31 +308,30 @@ static void fpga_set_texture_frame(void *data,
       const void *frame, bool rgb32, unsigned width, unsigned height,
       float alpha)
 {
-   fpga_t *fpga   = (fpga_t*)data;
-   unsigned pitch = width * 2;
+   fpga_t  *fpga    = (fpga_t*)data;
+   unsigned pitch   = width * (rgb32 ? 4 : 2);
+   size_t   required;
 
-   if (fpga->rgb32)
-      pitch = width * 4;
+   if (!frame || !width || !height || !pitch)
+      return;
 
-   if (fpga->menu_frame)
-      free(fpga->menu_frame);
-   fpga->menu_frame = NULL;
+   required = (size_t)pitch * (size_t)height;
 
-   if (  !fpga->menu_frame           ||
-         fpga->menu_width  != width  ||
-         fpga->menu_height != height ||
-         fpga->menu_pitch != pitch)
-      if (pitch && height)
-         fpga->menu_frame = (unsigned char*)malloc(pitch * height);
-
-   if (fpga->menu_frame && frame && pitch && height)
+   if (required > fpga->menu_frame_cap)
    {
-      memcpy(fpga->menu_frame, frame, pitch * height);
-      fpga->menu_width  = width;
-      fpga->menu_height = height;
-      fpga->menu_pitch  = pitch;
-      fpga->menu_bits   = fpga->rgb32 ? 32 : 16;
+      unsigned char *tmp = (unsigned char*)realloc(
+            fpga->menu_frame, required);
+      if (!tmp)
+         return;                        /* keep previous frame intact */
+      fpga->menu_frame     = tmp;
+      fpga->menu_frame_cap = required;
    }
+
+   memcpy(fpga->menu_frame, frame, required);
+   fpga->menu_width  = width;
+   fpga->menu_height = height;
+   fpga->menu_pitch  = pitch;
+   fpga->menu_bits   = rgb32 ? 32 : 16;
 }
 
 /* TODO/FIXME - implement */
@@ -373,10 +373,11 @@ static const video_poke_interface_t fpga_poke_interface = {
    NULL, /* get_current_shader */
    NULL, /* get_current_software_framebuffer */
    NULL, /* get_hw_render_interface */
-   NULL, /* set_hdr_max_nits */
+   NULL, /* set_hdr_menu_nits */
    NULL, /* set_hdr_paper_white_nits */
-   NULL, /* set_hdr_contrast */
-   NULL  /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void fpga_get_poke_interface(void *data,
@@ -411,6 +412,8 @@ video_driver_t video_fpga = {
 #endif
    fpga_get_poke_interface,
    NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
 #ifdef HAVE_GFX_WIDGETS
    NULL  /* gfx_widgets_enabled */
 #endif

@@ -26,11 +26,14 @@
 #include <retro_inline.h>
 #include <retro_math.h>
 #include <lists/string_list.h>
+#include <string/stdstring.h>
 
 #include "SDL.h"
 #include "SDL_audio.h"
 
 #include "../audio_driver.h"
+#include "../../msg_hash.h"
+#include "../../runloop.h"
 #include "../../verbosity.h"
 
 static INLINE int sdl_audio_find_num_frames(int rate, int latency)
@@ -746,5 +749,6 @@ audio_driver_t audio_sdl = {
    sdl_audio_list_new,
    sdl_audio_list_free,
    sdl_audio_write_avail,
-   NULL
+   NULL, /* buffer_size */
+   NULL  /* write_raw */
 };

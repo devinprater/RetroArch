@@ -69,7 +69,7 @@ static void task_audio_mixer_load_free(retro_task_t *task)
          mixer->cb(task, NULL, NULL, NULL);
    }
 
-   if (!string_is_empty(nbio->path))
+   if (nbio->path && *nbio->path)
       free(nbio->path);
    if (nbio->data)
       free(nbio->data);
@@ -115,7 +115,8 @@ static void task_audio_mixer_handle_upload_ogg(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -146,7 +147,8 @@ static void task_audio_mixer_handle_upload_ogg_and_play(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -177,7 +179,8 @@ static void task_audio_mixer_handle_upload_flac(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -208,7 +211,8 @@ static void task_audio_mixer_handle_upload_flac_and_play(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -239,7 +243,8 @@ static void task_audio_mixer_handle_upload_mp3(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -270,7 +275,8 @@ static void task_audio_mixer_handle_upload_mp3_and_play(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -301,7 +307,8 @@ static void task_audio_mixer_handle_upload_mod(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -332,7 +339,8 @@ static void task_audio_mixer_handle_upload_mod_and_play(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -364,7 +372,8 @@ static void task_audio_mixer_handle_upload_wav(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -395,7 +404,8 @@ static void task_audio_mixer_handle_upload_wav_and_play(retro_task_t *task,
    params.buf                  = img->buf;
    params.bufsize              = img->bufsize;
    params.cb                   = NULL;
-   params.basename             = !string_is_empty(img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.basename             = (img->path && *img->path) ? strdup(path_basename_nocompression(img->path)) : NULL;
+   params.buf_owned            = true;
 
    audio_driver_mixer_add_stream(&params);
 
@@ -548,7 +558,7 @@ bool task_push_audio_mixer_load_and_play(
 error:
    if (nbio)
    {
-      if (!string_is_empty(nbio->path))
+      if (nbio->path && *nbio->path)
          free(nbio->path);
       if (nbio->data)
          free(nbio->data);
@@ -675,7 +685,7 @@ bool task_push_audio_mixer_load(
 error:
    if (nbio)
    {
-      if (!string_is_empty(nbio->path))
+      if (nbio->path && *nbio->path)
          free(nbio->path);
       if (nbio->data)
          free(nbio->data);

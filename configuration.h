@@ -136,6 +136,9 @@ typedef struct settings
 #ifdef HAVE_D3D12
       int d3d12_gpu_index;
 #endif
+#ifdef HAVE_METAL
+      int metal_gpu_index;
+#endif
 #ifdef HAVE_WINDOW_OFFSET
       int video_window_offset_x;
       int video_window_offset_y;
@@ -355,6 +358,7 @@ typedef struct settings
       unsigned input_overlay_lightgun_four_touch_input;
       unsigned input_overlay_mouse_hold_msec;
       unsigned input_overlay_mouse_dtap_msec;
+      unsigned input_overlay_mouse_alt_two_touch_input;
 #endif
 
       unsigned run_ahead_frames;
@@ -381,6 +385,10 @@ typedef struct settings
       unsigned video_bfi_dark_frames;
       unsigned video_shader_subframes;
       unsigned video_autoswitch_refresh_rate;
+      unsigned video_hdr_mode;
+      unsigned video_hdr_subpixel_layout;
+      unsigned video_hdr_expand_gamut;
+
       unsigned quit_on_close_content;
 
 #ifdef HAVE_LAKKA
@@ -395,6 +403,13 @@ typedef struct settings
 
       unsigned cheevos_appearance_anchor;
       unsigned cheevos_visibility_summary;
+
+#ifdef HAVE_SMBCLIENT
+      unsigned smb_client_auth_mode;
+      unsigned smb_client_num_contexts;
+      unsigned smb_client_timeout;
+#endif
+      unsigned input_sensor_orientation;
    } uints;
 
    struct
@@ -417,9 +432,8 @@ typedef struct settings
       float video_msg_color_g;
       float video_msg_color_b;
       float video_msg_bgcolor_opacity;
-      float video_hdr_max_nits;
+      float video_hdr_menu_nits;
       float video_hdr_paper_white_nits;
-      float video_hdr_display_contrast;
 
       float menu_scale_factor;
       float menu_widget_scale_factor;
@@ -504,6 +518,7 @@ typedef struct settings
       char midi_driver[32];
       char midi_input[32];
       char midi_output[32];
+      char ai_service_backend[32];
 #ifdef HAVE_LAKKA
       char cpu_main_gov[32];
       char cpu_menu_gov[32];
@@ -529,9 +544,19 @@ typedef struct settings
       char audio_device[NAME_MAX_LENGTH];
       char camera_device[NAME_MAX_LENGTH];
       char netplay_mitm_server[NAME_MAX_LENGTH];
+#ifdef HAVE_NETWORKING
+#ifdef HAVE_CLOUDSYNC
       char webdav_url[NAME_MAX_LENGTH];
       char webdav_username[NAME_MAX_LENGTH];
       char webdav_password[NAME_MAX_LENGTH];
+      char google_drive_refresh_token[2048];
+#ifdef HAVE_S3
+      char s3_url[NAME_MAX_LENGTH];
+      char access_key_id[128];
+      char secret_access_key[186]; /* TODO/RESEARCH - check size, ex https://github.com/winscp/winscp/pull/15/files */
+#endif
+#endif
+#endif
 
       char crt_switch_timings[NAME_MAX_LENGTH];
       char input_reserved_devices[MAX_USERS][NAME_MAX_LENGTH];
@@ -543,7 +568,15 @@ typedef struct settings
       char ai_service_url[PATH_MAX_LENGTH];
 
       char translation_service_url[2048]; /* TODO/FIXME - check size */
-   } arrays;
+#ifdef HAVE_SMBCLIENT
+      char smb_client_server_address[256];
+      char smb_client_share[256];
+      char smb_client_subdir[PATH_MAX_LENGTH];
+      char smb_client_username[128];
+      char smb_client_password[128];
+      char smb_client_workgroup[64];
+#endif
+} arrays;
 
    struct
    {
@@ -648,6 +681,7 @@ typedef struct settings
       bool video_dingux_ipu_keep_aspect;
       bool video_scale_integer;
       bool video_shader_enable;
+      bool video_shader_deferred_loading;
       bool video_shader_watch_files;
       bool video_shader_remember_last_dir;
       bool video_shader_preset_save_reference_enable;
@@ -671,8 +705,7 @@ typedef struct settings
 #endif
       bool video_wiiu_prefer_drc;
       bool video_notch_write_over_enable;
-      bool video_hdr_enable;
-      bool video_hdr_expand_gamut;
+      bool video_hdr_scanlines;
       bool video_use_metal_arg_buffers;
 
       /* Accessibility */
@@ -893,6 +926,9 @@ typedef struct settings
 #ifdef HAVE_MIST
       bool settings_show_steam;
 #endif
+#ifdef HAVE_SMBCLIENT
+      bool settings_show_smb_client;
+#endif
       bool quick_menu_show_resume_content;
       bool quick_menu_show_restart_content;
       bool quick_menu_show_close_content;
@@ -1064,6 +1100,7 @@ typedef struct settings
       bool sort_savestates_by_content_enable;
       bool sort_screenshots_by_content_enable;
       bool config_save_on_exit;
+      bool config_save_minimal;
       bool remap_save_on_exit;
 
       bool show_hidden_files;
@@ -1075,15 +1112,20 @@ typedef struct settings
       bool savestates_in_content_dir;
       bool screenshots_in_content_dir;
       bool systemfiles_in_content_dir;
-      bool ssh_enable;
 #ifdef HAVE_LAKKA_SWITCH
       bool switch_oc;
       bool switch_cec;
       bool bluetooth_ertm_disable;
 #endif
+#ifdef HAVE_LAKKA
+      bool ssh_enable;
       bool samba_enable;
       bool bluetooth_enable;
+#ifdef HAVE_RETROFLAG
+      bool safeshutdown_enable;
+#endif
       bool localap_enable;
+#endif
 
       bool video_window_show_decorations;
       bool video_window_save_positions;
@@ -1103,7 +1145,9 @@ typedef struct settings
       bool playlist_use_filename;
       bool playlist_allow_non_png;
 
-      bool quit_press_twice;
+      bool confirm_quit;
+      bool confirm_close;
+      bool confirm_reset;
       bool vibrate_on_keypress;
       bool enable_device_vibration;
       bool ozone_collapse_sidebar;
@@ -1145,6 +1189,9 @@ typedef struct settings
       bool game_ai_show_debug;
 #endif
 
+#ifdef HAVE_SMBCLIENT
+      bool smb_client_enable;
+#endif
    } bools;
 
    uint8_t flags;
@@ -1345,8 +1392,6 @@ int8_t config_save_overrides(enum override_type type,
  * another one. Will load a dummy core to flush state
  * properly. */
 bool config_replace(bool config_save_on_exit, char *path);
-
-config_file_t *open_default_config_file(void);
 #endif
 
 bool config_overlay_enable_default(void);
@@ -1393,7 +1438,7 @@ void input_config_parse_mouse_button(
       void *conf_data, const char *prefix,
       const char *btn, void *bind_data);
 
-const char *input_config_get_prefix(unsigned user, bool meta);
+void input_config_get_prefix(char *s, char len, char user, bool meta);
 
 RETRO_END_DECLS
 

@@ -203,7 +203,6 @@ typedef struct ctr_video
    bool state_data_exist;
    bool bottom_check_idle;
    bool bottom_is_idle;
-   bool bottom_is_fading;
    char state_date[CTR_STATE_DATE_SIZE];
 } ctr_video_t;
 
@@ -250,7 +249,6 @@ typedef struct
  * externally, otherwise cannot detect current state
  * when reinitialising... */
 static bool ctr_bottom_screen_enabled  = true;
-static int fade_count                  = 256;
 
 /*
  * FORWARD DECLARATIONS
@@ -491,11 +489,14 @@ static int ctr_font_get_message_width(void* data, const char* msg,
    int delta_x = 0;
    const struct font_glyph* glyph_q = NULL;
    ctr_font_t* font                 = (ctr_font_t*)data;
+   const struct font_glyph* (*get_glyph)(void*, uint32_t)
+                                    = font->font_driver->get_glyph;
+   void *font_data                  = font->font_data;
 
    if (!font)
       return 0;
 
-   glyph_q = font->font_driver->get_glyph(font->font_data, '?');
+   glyph_q = get_glyph(font_data, '?');
 
    for (i = 0; i < msg_len; i++)
    {
@@ -509,8 +510,7 @@ static int ctr_font_get_message_width(void* data, const char* msg,
 
 
       /* Do something smarter here ... */
-      if (!(glyph =
-               font->font_driver->get_glyph(font->font_data, code)))
+      if (!(glyph = get_glyph(font_data, code)))
          if (!(glyph = glyph_q))
             continue;
 
@@ -522,36 +522,57 @@ static int ctr_font_get_message_width(void* data, const char* msg,
 
 static void ctr_font_render_line(
       ctr_video_t *ctr,
-      ctr_font_t* font, const char* msg, size_t msg_len,
-      float scale, const unsigned int color, float pos_x,
+      ctr_font_t* font,
+      const struct font_glyph* glyph_q,
+      const char* msg,
+      size_t msg_len,
+      float scale,
+      const unsigned int color,
+      float pos_x,
       float pos_y,
-      unsigned width, unsigned height, unsigned text_align)
+      unsigned width,
+      unsigned height,
+      unsigned text_align)
 {
    unsigned int i;
-   const struct font_glyph* glyph_q = NULL;
-   ctr_vertex_t* v  = NULL;
-   int delta_x      = 0;
-   int delta_y      = 0;
-   int x            = roundf(pos_x * width);
-   int y            = roundf((1.0f - pos_y) * height);
+   const char* msg_end = msg + msg_len;
+   ctr_vertex_t* v     = NULL;
+   int delta_x         = 0;
+   int delta_y         = 0;
+   int x               = roundf(pos_x * width);
+   int y               = roundf((1.0f - pos_y) * height);
+   const struct font_glyph* (*get_glyph)(void*, uint32_t)
+                       = font->font_driver->get_glyph;
+   void *font_data     = font->font_data;
 
-   switch (text_align)
+   /* For right/center alignment, compute width with a lightweight pass
+    * that only accumulates advance_x — avoids the redundant glyph lookups
+    * and atlas dirty checks that ctr_font_get_message_width would repeat. */
+   if (text_align == TEXT_ALIGN_RIGHT || text_align == TEXT_ALIGN_CENTER)
    {
-      case TEXT_ALIGN_RIGHT:
-         x += width - ctr_font_get_message_width(font, msg, msg_len, scale);
-         break;
+      int width_accum      = 0;
+      const char *scan     = msg;
+      const char *scan_end = msg_end;
+      while (scan < scan_end)
+      {
+         const struct font_glyph *glyph;
+         uint32_t code       = utf8_walk(&scan);
+         if (!(glyph = get_glyph(font_data, code)))
+            if (!(glyph = glyph_q))
+               continue;
+         width_accum += glyph->advance_x;
+      }
 
-      case TEXT_ALIGN_CENTER:
-         x += width / 2 -
-            ctr_font_get_message_width(font, msg, msg_len, scale) / 2;
-         break;
+      if (text_align == TEXT_ALIGN_RIGHT)
+         x -= (int)(width_accum * scale);
+      else
+         x -= (int)(width_accum * scale) / 2;
    }
 
    if ((ctr->vertex_cache.size - (ctr->vertex_cache.current - ctr->vertex_cache.buffer)) < msg_len)
       ctr->vertex_cache.current = ctr->vertex_cache.buffer;
 
    v       = ctr->vertex_cache.current;
-   glyph_q = font->font_driver->get_glyph(font->font_data, '?');
 
    for (i = 0; i < msg_len; i++)
    {
@@ -565,8 +586,7 @@ static void ctr_font_render_line(
          i += skip - 1;
 
       /* Do something smarter here ... */
-      if (!(glyph =
-               font->font_driver->get_glyph(font->font_data, code)))
+      if (!(glyph = get_glyph(font_data, code)))
          if (!(glyph = glyph_q))
             continue;
 
@@ -663,23 +683,25 @@ static void ctr_font_render_message(
 {
    float line_height;
    struct font_line_metrics *line_metrics = NULL;
+   const struct font_glyph* (*get_glyph)(void*, uint32_t)
+                                          = font->font_driver->get_glyph;
+   void *font_data                        = font->font_data;
+   const struct font_glyph* glyph_q       = get_glyph(font_data, '?');
    int lines                              = 0;
-   font->font_driver->get_line_metrics(font->font_data, &line_metrics);
+   font->font_driver->get_line_metrics(font_data, &line_metrics);
    line_height = (float)line_metrics->height * scale / (float)height;
-
    for (;;)
    {
-      const char* delim = strchr(msg, '\n');
-      size_t msg_len    = delim ? (size_t)(delim - msg) : strlen(msg);
+      const char *end = msg;
+      while (*end && *end != '\n')
+         end++;
 
-      /* Draw the line */
-      ctr_font_render_line(ctr, font, msg, msg_len,
+      ctr_font_render_line(ctr, font, glyph_q, msg, (size_t)(end - msg),
             scale, color, pos_x, pos_y - (float)lines * line_height,
             width, height, text_align);
-      if (!delim)
+      if (!*end)
          break;
-
-      msg += msg_len + 1;
+      msg = end + 1;
       lines++;
    }
 }
@@ -770,7 +792,7 @@ static const struct font_glyph* ctr_font_get_glyph(
 {
    ctr_font_t* font = (ctr_font_t*)data;
    if (font && font->font_driver)
-      return font->font_driver->get_glyph((void*)font->font_driver, code);
+      return font->font_driver->get_glyph((void*)font->font_data, code);
    return NULL;
 }
 
@@ -904,44 +926,13 @@ static void ctr_free_overlay(ctr_video_t *ctr)
 }
 #endif
 
-static void ctr_update_viewport(
-      ctr_video_t* ctr,
-      settings_t *settings,
-      int custom_vp_x,
-      int custom_vp_y,
-      unsigned custom_vp_width,
-      unsigned custom_vp_height
-      )
+static void ctr_update_viewport(ctr_video_t* ctr)
 {
-   int x                     = 0;
-   int y                     = 0;
-   float width               = ctr->vp.full_width;
-   float height              = ctr->vp.full_height;
-   float desired_aspect      = video_driver_get_aspect_ratio();
-   bool video_scale_integer  = settings->bools.video_scale_integer;
-   unsigned aspect_ratio_idx = settings->uints.video_aspect_ratio_idx;
-
-   if (video_scale_integer)
-   {
-      /* TODO: does CTR use top-left or bottom-left coordinates? assuming top-left. */
-      video_viewport_get_scaled_integer(&ctr->vp, ctr->vp.full_width,
-          ctr->vp.full_height, desired_aspect, ctr->keep_aspect,
-          true);
-   }
-   else if (ctr->keep_aspect)
-      video_viewport_get_scaled_aspect(&ctr->vp, width, height, true);
-   else
-   {
-      ctr->vp.x      = 0;
-      ctr->vp.y      = 0;
-      ctr->vp.width  = width;
-      ctr->vp.height = height;
-   }
+   video_driver_update_viewport(&ctr->vp, false, ctr->keep_aspect, true);
 
    ctr_set_screen_coords(ctr);
 
    ctr->should_resize = false;
-
 }
 
 static const char *ctr_texture_path(unsigned id)
@@ -1197,15 +1188,11 @@ static void ctr_bottom_menu_control(void* data,
       if (ctr->bottom_is_idle)
       {
          ctr->bottom_is_idle    = false;
-         ctr->bottom_is_fading  = false;
-         fade_count             = 256;
          ctr_set_bottom_screen_enable(true,true);
       }
       else if (ctr->bottom_check_idle)
       {
          ctr->bottom_check_idle = false;
-         ctr->bottom_is_fading  = false;
-         fade_count             = 256;
       }
 
       if (ctr->bottom_menu == CTR_BOTTOM_MENU_NOT_AVAILABLE)
@@ -1567,34 +1554,6 @@ static void ctr_render_bottom_screen(void *data)
    }
 }
 
-/* graphic function originates from here:
- * https://github.com/smealum/3ds_hb_menu/blob/master/source/gfx.c
- */
-void ctr_fade_bottom_screen(gfxScreen_t screen, gfx3dSide_t side, u32 f)
-{
-#ifndef CONSOLE_LOG
-   int i;
-   u16 fbWidth, fbHeight;
-   u8* fbAdr = gfxGetFramebuffer(screen, side, &fbWidth, &fbHeight);
-
-   for(i = 0; i < fbWidth * fbHeight / 2; i++)
-   {
-      *fbAdr = (*fbAdr * f) >> 8;
-      fbAdr++;
-      *fbAdr = (*fbAdr * f) >> 8;
-      fbAdr++;
-      *fbAdr = (*fbAdr * f) >> 8;
-      fbAdr++;
-      *fbAdr = (*fbAdr * f) >> 8;
-      fbAdr++;
-      *fbAdr = (*fbAdr * f) >> 8;
-      fbAdr++;
-      *fbAdr = (*fbAdr * f) >> 8;
-      fbAdr++;
-   }
-#endif
-}
-
 static void ctr_set_bottom_screen_idle(ctr_video_t * ctr)
 {
    u64 elapsed_tick;
@@ -1605,28 +1564,10 @@ static void ctr_set_bottom_screen_idle(ctr_video_t * ctr)
 
    if ( elapsed_tick > 2000000000 )
    {
-      if (!ctr->bottom_is_fading)
-	  {
-         ctr->bottom_is_fading    = true;
-         ctr->refresh_bottom_menu = true;
-         return;
-      }
-
-      if (fade_count > 0)
-      {
-         fade_count--;
-         ctr_fade_bottom_screen(GFX_BOTTOM, GFX_LEFT, fade_count);
-
-         if (fade_count <= 128)
-         {
-            ctr->bottom_is_idle    = true;
-            ctr->bottom_is_fading  = false;
-            ctr->bottom_check_idle = false;
-            fade_count             = 256;
-            ctr_set_bottom_screen_enable(false,true);
-            return;
-         }
-      }
+      ctr->bottom_is_idle    = true;
+      ctr->bottom_check_idle = false;
+      ctr_set_bottom_screen_enable(false,true);
+      return;
    }
 }
 
@@ -1817,7 +1758,6 @@ static void* ctr_init(const video_info_t* video,
    ctr->prev_bottom_menu           = CTR_BOTTOM_MENU_NOT_AVAILABLE;
    ctr->bottom_check_idle          = false;
    ctr->bottom_is_idle             = false;
-   ctr->bottom_is_fading           = false;
    ctr->idle_timestamp             = 0;
    ctr->state_slot                 = settings->ints.state_slot;
 
@@ -2173,12 +2113,7 @@ static bool ctr_frame(void* data, const void* frame,
 #endif
 
    if (ctr->should_resize)
-      ctr_update_viewport(ctr, settings,
-            custom_vp_x,
-            custom_vp_y,
-            custom_vp_width,
-            custom_vp_height
-            );
+      ctr_update_viewport(ctr);
 
    if (ctr->refresh_bottom_menu)
       ctrGuSetMemoryFill(true,
@@ -2476,10 +2411,6 @@ static bool ctr_frame(void* data, const void* frame,
       gspPresentBuffer(GFX_BOTTOM, ctr->current_buffer_bottom, bottom, bottom,
             stride, GSP_BGR8_OES);
    }
-   else if (ctr->bottom_is_fading)
-   {
-      gfxScreenSwapBuffers(GFX_BOTTOM,false);
-   }
 #endif
 #else
    topFramebufferInfo.
@@ -2550,7 +2481,7 @@ static bool ctr_frame(void* data, const void* frame,
 #endif
 #endif
    ctr->current_buffer_top     ^= 1;
-   if (ctr->refresh_bottom_menu || ctr->bottom_is_fading)
+   if (ctr->refresh_bottom_menu)
       ctr->current_buffer_bottom  ^= 1;
 
    ctr->p3d_event_pending       = true;
@@ -3079,10 +3010,11 @@ static const video_poke_interface_t ctr_poke_interface = {
    NULL, /* get_current_shader */
    NULL, /* get_current_software_framebuffer */
    NULL, /* get_hw_render_interface */
-   NULL, /* set_hdr_max_nits */
+   NULL, /* set_hdr_menu_nits */
    NULL, /* set_hdr_paper_white_nits */
-   NULL, /* set_hdr_contrast */
-   NULL  /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void ctr_get_poke_interface(void* data,
@@ -3119,6 +3051,8 @@ video_driver_t video_ctr =
 #endif
    ctr_get_poke_interface,
    NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
 #ifdef HAVE_GFX_WIDGETS
    ctr_widgets_enabled
 #endif

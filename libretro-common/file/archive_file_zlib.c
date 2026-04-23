@@ -31,6 +31,10 @@
 
 #include <zlib.h>
 
+#ifdef HAVE_ZSTD
+#include <zstd.h>
+#endif
+
 #ifndef CENTRAL_FILE_HEADER_SIGNATURE
 #define CENTRAL_FILE_HEADER_SIGNATURE 0x02014b50
 #endif
@@ -44,7 +48,8 @@
 enum file_archive_compression_mode
 {
    ZIP_MODE_STORED   = 0,
-   ZIP_MODE_DEFLATED = 8
+   ZIP_MODE_DEFLATED = 8,
+   ZIP_MODE_ZSTD     = 93
 };
 
 typedef struct
@@ -163,6 +168,19 @@ static bool zlib_stream_decompress_data_to_file_init(
          return false;
       }
    }
+#ifdef HAVE_ZSTD
+   else if (cmode == ZIP_MODE_ZSTD)
+   {
+      /* Allocate a buffer to read compressed data into;
+       * decompression is done in one shot during iterate */
+      zip_context->tmpbuf = (uint8_t*)malloc(csize);
+      if (!zip_context->tmpbuf)
+      {
+         zip_context_free_stream(zip_context, false);
+         return false;
+      }
+   }
+#endif
 
    return true;
 }
@@ -243,6 +261,45 @@ static int zlib_stream_decompress_data_to_file_iterate(
 
       return 0;   /* still more data to process */
    }
+#ifdef HAVE_ZSTD
+   else if (zip_context->cmode == ZIP_MODE_ZSTD)
+   {
+      size_t result;
+
+#ifdef HAVE_MMAP
+      if (state->archive_mmap_data)
+      {
+         result = ZSTD_decompress(
+               zip_context->decompressed_data, zip_context->usize,
+               state->archive_mmap_data + (size_t)zip_context->fdoffset,
+               zip_context->csize);
+      }
+      else
+#endif
+      {
+         /* Read all compressed data, then decompress */
+         filestream_seek(state->archive_file,
+               zip_context->fdoffset,
+               RETRO_VFS_SEEK_POSITION_START);
+         if (filestream_read(state->archive_file,
+                  zip_context->tmpbuf, zip_context->csize) < 0)
+            return -1;
+
+         result = ZSTD_decompress(
+               zip_context->decompressed_data, zip_context->usize,
+               zip_context->tmpbuf, zip_context->csize);
+      }
+
+      if (ZSTD_isError(result))
+         return -1;
+
+      free(zip_context->tmpbuf);
+      zip_context->tmpbuf = NULL;
+
+      handle->data = zip_context->decompressed_data;
+      return 1;
+   }
+#endif
 
    /* No idea what kind of compression this is */
    return -1;
@@ -302,7 +359,14 @@ static int zip_file_decompressed(
       uint32_t crc32, struct archive_extract_userdata *userdata)
 {
    decomp_state_t* decomp_state = (decomp_state_t*)userdata->cb_data;
-   char last_char = name[strlen(name) - 1];
+   size_t name_len              = name ? strlen(name) : 0;
+   char last_char;
+   /* Reject empty or NULL name -- strlen-1 on empty would read
+    * name[SIZE_MAX].  Malformed archives can have 0-length filename
+    * entries. */
+   if (name_len == 0)
+      return 1;
+   last_char = name[name_len - 1];
    /* Ignore directories. */
    if (last_char == '/' || last_char == '\\')
       return 1;
@@ -444,10 +508,27 @@ static int zip_parse_file_init(file_archive_transfer_t *state,
          || directory_offset > state->archive_size)
       return -1;
 
+   /* Combined sanity check: the directory must fit entirely within
+    * the archive.  Without this, offset + size could wrap or point
+    * past EOF, producing a large bogus allocation and a short read. */
+   if ((int64_t)directory_offset + (int64_t)directory_size > state->archive_size)
+      return -1;
+
+   /* Reject sizes that would overflow the allocation on 32-bit hosts.
+    * size_t is 32-bit on 3DS / Vita / PSP / Wii / Wii U, where a
+    * directory_size near UINT32_MAX would wrap
+    *     sizeof(zip_context_t) + (size_t)directory_size
+    * to a tiny value, after which directory_end runs off the end of
+    * the allocation. */
+   if ((size_t)directory_size > SIZE_MAX - sizeof(zip_context_t))
+      return -1;
+
    /* This is a ZIP file, allocate one block of memory for both the
     * context and the entire directory, then read the directory.
     */
    zip_context = (zip_context_t*)malloc(sizeof(zip_context_t) + (size_t)directory_size);
+   if (!zip_context)
+      return -1;
    zip_context->state             = state;
    zip_context->directory         = (uint8_t*)(zip_context + 1);
    zip_context->directory_entry   = zip_context->directory;
@@ -481,6 +562,12 @@ static int zip_parse_file_iterate_step_internal(
    if (entry < zip_context->directory || entry >= zip_context->directory_end)
       return 0;
 
+   /* Central-directory fixed header is 46 bytes (highest-offset read
+    * is at +42..+45).  Reject a truncated trailing entry before any
+    * out-of-bounds read. */
+   if ((size_t)(zip_context->directory_end - entry) < 46)
+      return -1;
+
    signature = read_le(zip_context->directory_entry + 0, 4);
 
    if (signature != CENTRAL_FILE_HEADER_SIGNATURE)
@@ -496,6 +583,13 @@ static int zip_parse_file_iterate_step_internal(
    commentlength  = read_le(zip_context->directory_entry + 32, 2); /* file comment length */
 
    if (namelength >= PATH_MAX_LENGTH)
+      return -1;
+
+   /* Variable-length fields (name, extra, comment) follow the 46-byte
+    * fixed header.  Reject if the declared sizes would run past the
+    * end of the directory block. */
+   if ((size_t)(zip_context->directory_end - entry)
+         < (size_t)46 + namelength + extralength + commentlength)
       return -1;
 
    memcpy(filename, zip_context->directory_entry + 46, namelength); /* file name */

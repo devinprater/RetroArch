@@ -201,11 +201,23 @@ static void retro_task_internal_gather(void)
       if (task->cleanup)
           task->cleanup(task);
 
+#ifdef HAVE_THREADS
+      slock_lock(property_lock);
+#endif
       if (task->error)
+      {
          free(task->error);
+         task->error = NULL;
+      }
 
       if (task->title)
+      {
          free(task->title);
+         task->title = NULL;
+      }
+#ifdef HAVE_THREADS
+      slock_unlock(property_lock);
+#endif
 
       free(task);
    }
@@ -349,7 +361,7 @@ static void task_queue_remove(task_queue_t *queue, retro_task_t *task)
 {
    retro_task_t     *t = NULL;
    retro_task_t *front = queue->front;
-
+ 
    /* Remove first element if needed */
    if (task == front)
    {
@@ -359,10 +371,10 @@ static void task_queue_remove(task_queue_t *queue, retro_task_t *task)
       task->next       = NULL;
       return;
    }
-
+ 
    /* Parse queue */
    t = front;
-
+ 
    while (t && t->next)
    {
       /* Remove task and update queue */
@@ -370,16 +382,13 @@ static void task_queue_remove(task_queue_t *queue, retro_task_t *task)
       {
          t->next    = task->next;
          task->next = NULL;
-
+ 
          /* When removing the tail of the queue, update the tail pointer */
          if (queue->back == task)
-         {
-            if (queue->back == task)
-               queue->back = t;
-         }
+            queue->back = t;
          break;
       }
-
+ 
       /* Update iterator */
       t = t->next;
    }
@@ -911,13 +920,16 @@ void task_queue_cancel_task(void *task)
 
 void *task_queue_retriever_info_next(task_retriever_info_t **link)
 {
-   /* Grab data and move to next link */
+   void *data = NULL;
+
+   /* Grab data from current link, then advance */
    if (*link)
    {
+      data  = (*link)->data;
       *link = (*link)->next;
-      return (*link)->data;
    }
-   return NULL;
+
+   return data;
 }
 
 void task_queue_retriever_info_free(task_retriever_info_t *list)
